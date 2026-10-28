@@ -1,16 +1,16 @@
 # modbus_slave — Modbus RTU Slave Protocol Stack
 
-A Modbus RTU slave stack in portable C99 with a pluggable server backend.
+A Modbus RTU slave stack in portable C99 with a pluggable backend.
 
 - **Pure C core**: framing (RX/TX state machines, T3.5 inter-frame timing,
   TX watchdog, CRC16), PDU execution for 9 function codes, and response
   building. The core includes only `<stdint.h>`/`<stddef.h>` — no QP, no
   RTOS, no vendor headers — so it compiles anywhere and can be reused under
   a different backend.
-- **Replaceable server backend** under `server/`: a backend receives frame
+- **Replaceable backend** under `backend/`: a backend receives frame
   events from the core and drives the receive/execute/send primitives in its
   own context (QP state machine, bare-metal superloop, RTOS task). The QP
-  backend ships in this repository; `server/bare/` and `server/rtos/` are
+  backend ships in this repository; `backend/bare/` and `backend/freertos/` are
   extension points.
 - **Board-owned hardware**: the board module implements the hardware port
   (UART direction control, byte output, one-shot timer, critical sections)
@@ -29,19 +29,19 @@ inter-frame gap is implemented (no strict T1.5).
 modbus_slave/                      this stack's root
 ├── README.md                      this file
 ├── LICENSE-MIT                    license of the pure C core
-├── LICENSE-GPL-3.0                license of server/qp/
+├── LICENSE-GPL-3.0                license of backend/qp/
 ├── modbus_slave.h                 public core API
 ├── modbus_slave_internal.h        internal constants/state enums (core only)
 ├── modbus_slave.c                 ctor/start/stop, receive/execute/send, ISRs, event port
 ├── modbus_slave_rtu.c             RX/TX frame machines, T3.5, TX watchdog, ADU
 ├── modbus_slave_pdu.c             the 9 function codes
 ├── modbus_slave_crc.c             CRC16/Modbus (256-entry table)
-└── server/                        backends
+└── backend/                       backends
     ├── qp/                        QP/C (QHsm) backend — GPL-3.0-or-later
-    │   ├── modbus_slave_server_qp.h
-    │   └── modbus_slave_server_qp.c
+    │   ├── modbus_slave_qp.h
+    │   └── modbus_slave_qp.c
     ├── bare/                      (future) bare-metal superloop backend
-    └── rtos/                      (future) RTOS-task backend
+    └── freertos/                  (future) FreeRTOS backend
 ```
 
 The repository root above this directory holds only the shared
@@ -53,7 +53,7 @@ further stacks can be added next to `modbus_slave/`.
 ```
 application callbacks (coils/registers)
         ▲
-server backend (qp | bare | rtos)   QHsm / superloop / task
+backend (qp | bare | freertos)   QHsm / superloop / task
         ▲  event port (frame received / frame sent / TX timeout)
 modbus_slave_t core                 pure C: port, RX/TX FSM, T3.5, CRC, PDU
         ▲  hardware port (UART, DE, timer, critical section)
@@ -152,19 +152,19 @@ frame the backend is still processing. The backend re-opens reception with
 `SENDING` completes or aborts) — every path re-enables RX, so a stuck
 transmitter can never leave the slave deaf.
 
-## Server backends
+## Backends
 
 | Backend | Event context | Status |
 |---|---|---|
-| `server/qp` | directed `QACTIVE_POST()` to this channel's AO | provided, GPL-3.0-or-later |
-| `server/bare` | flag set, polled by a superloop | planned |
-| `server/rtos` | task notify / queue | planned |
+| `backend/qp` | directed `QACTIVE_POST()` to this channel's AO | provided, GPL-3.0-or-later |
+| `backend/bare` | flag set, polled by a superloop | planned |
+| `backend/freertos` | task notify / queue | planned |
 
 ### QP backend
 
-`modbus_slave_server_qp_t` is a **QHsm component**, not an active object:
+`modbus_slave_qp_t` is a **QHsm component**, not an active object:
 each channel's AO embeds it and forwards the protocol signals with
-`QASM_DISPATCH(&me->server.super, e, 0u)`.
+`QASM_DISPATCH(&me->backend.super, e, 0u)`.
 
 ```
 STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
@@ -181,7 +181,7 @@ STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
 | IDLE | STOP | `stop()` | STOPPED |
 | IDLE | FRAME_SENT / TX_TIMEOUT | ignore (stale) | IDLE |
 | SENDING | FRAME_SENT | — | IDLE |
-| SENDING | TX_TIMEOUT | `abort_tx()`, increment `last_error` (readable with `modbus_slave_server_qp_tx_timeout_count()`) | IDLE |
+| SENDING | TX_TIMEOUT | `abort_tx()`, increment `last_error` (readable with `modbus_slave_qp_tx_timeout_count()`) | IDLE |
 | SENDING | STOP | `stop()` | STOPPED |
 | SENDING | CONFIG | keep pending | SENDING |
 | SENDING | FRAME_RCVED | ignore | SENDING |
@@ -189,7 +189,7 @@ STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
 The initial transition lands in `IDLE`, whose entry applies the pending
 configuration and starts the core.
 
-Call `modbus_slave_server_qp_init()` once, **after** `QACTIVE_START()` (or
+Call `modbus_slave_qp_init()` once, **after** `QACTIVE_START()` (or
 from the AO's own initial transition). `QACTIVE_START()` is what gives the
 AO its priority and event queue, so initializing earlier would open the bus
 before an ISR-posted protocol event has a valid target. If the backend was
@@ -200,7 +200,7 @@ The AO must forward the six signals in **every** state it can be in while the
 slave is in service. An `MB_FRAME_RCVED_SIG` left in the queue keeps the core
 with RX off, and the slave stays deaf until that event is dispatched.
 
-Signals (from `modbus_slave_server_qp.h`): `MB_FRAME_RCVED_SIG`,
+Signals (from `modbus_slave_qp.h`): `MB_FRAME_RCVED_SIG`,
 `MB_FRAME_SENT_SIG`, `MB_TX_TIMEOUT_SIG` are posted by the backend's event
 port from interrupt context; `MB_START_SIG`, `MB_STOP_SIG`, `MB_CONFIG_SIG`
 are posted by the application. Application-defined signals start at
@@ -220,7 +220,7 @@ Minimal application shape:
 ```c
 typedef struct {
     QActive super;                    /* offset 0 */
-    modbus_slave_server_qp_t server;  /* QHsm, points at the core */
+    modbus_slave_qp_t backend;        /* QHsm, points at the core */
     /* register image, ... */
 } ModbusApp;
 
@@ -233,7 +233,7 @@ static QState ModbusApp_ready(ModbusApp* me, QEvt const* e)
         case MB_START_SIG:
         case MB_STOP_SIG:
         case MB_CONFIG_SIG:
-            QASM_DISPATCH(&me->server.super, e, 0u);
+            QASM_DISPATCH(&me->backend.super, e, 0u);
             return Q_HANDLED();
         /* ... application signals ... */
     }
@@ -267,7 +267,7 @@ AO's queue/stack.
 ## Building
 
 The core is four `.c` files plus the two headers; add
-`modbus_slave/*.c` (excluding `server/`) to any C99 project — no QP
+`modbus_slave/*.c` (excluding `backend/`) to any C99 project — no QP
 include paths required. The QP backend additionally needs the QP/C 8.x
 include path and a port (e.g. `ports/arm-cm/qv/gnu` plus
 `ports/arm-cm/config`).
@@ -280,9 +280,9 @@ arm-none-eabi-gcc -std=c99 -Wall -Wextra -Werror -pedantic -I modbus_slave -c mo
 
 # QP backend, QP 8.1.3
 arm-none-eabi-gcc -std=c11 -Wall -Wextra -Werror -mcpu=cortex-m4 -mthumb \
-    -I modbus_slave -I modbus_slave/server/qp \
+    -I modbus_slave -I modbus_slave/backend/qp \
     -I <qpc>/include -I <qpc>/ports/arm-cm/qv/gnu -I <qpc>/ports/arm-cm/config \
-    -c modbus_slave/server/qp/modbus_slave_server_qp.c
+    -c modbus_slave/backend/qp/modbus_slave_qp.c
 ```
 
 Formatting: `clang-format` with the repository-root `.clang-format`;
@@ -292,11 +292,11 @@ the sources are kept format-clean.
 
 - **Core** (`modbus_slave.h`, `modbus_slave_internal.h`, the four `.c`
   files): MIT — see `LICENSE-MIT`.
-- **`server/qp/`**: GPL-3.0-or-later — see `LICENSE-GPL-3.0`. QP/C itself is
+- **`backend/qp/`**: GPL-3.0-or-later — see `LICENSE-GPL-3.0`. QP/C itself is
   dual-licensed (GPL or commercial from Quantum Leaps).
 
 Because QP/C is GPL-3.0-or-later (absent a commercial license), a firmware
 that links the QP backend is a combined work and its overall distribution
 is subject to the GPL. The MIT core alone does not impose that; a
-permissively licensed `server/bare/` backend keeps a proprietary firmware
+permissively licensed `backend/bare/` backend keeps a proprietary firmware
 possible.

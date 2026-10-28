@@ -16,7 +16,7 @@
  * - The board supplies hardware capabilities through modbus_slave_port_t
  *   (serial direction control, byte output, one-shot timer, critical
  *   sections), passed to modbus_slave_ctor().
- * - A server backend (QP, bare metal loop, RTOS task, ...) drives the core:
+ * - A backend (QP, bare metal loop, RTOS task, ...) drives the core:
  *   it receives frame events through modbus_slave_event_port_t and then
  *   calls modbus_slave_receive()/modbus_slave_execute()/modbus_slave_send()
  *   in its own context.
@@ -104,10 +104,10 @@ typedef struct {
                           uint32_t state);
 } modbus_slave_port_t;
 
-/* Event interface (server-backend-provided) ------------------------------- */
+/* Event interface (backend-provided) ------------------------------- */
 
 /**
- * @brief Frame-level events the core reports to its server backend.
+ * @brief Frame-level events the core reports to its backend.
  *
  * All three functions are called from interrupt context: on_frame_received
  * from the T3.5 expiry (receive is already switched off), on_frame_sent from
@@ -158,7 +158,7 @@ typedef modbus_slave_exception_t (*modbus_slave_bits_fn)(
  * Out-of-range addresses must return
  * MODBUS_SLAVE_EX_ILLEGAL_DATA_ADDRESS.
  *
- * A callback runs synchronously inside the server backend's context; it has
+ * A callback runs synchronously inside the backend's context; it has
  * to be short and must not block. When the data is not ready, return
  * MODBUS_SLAVE_EX_SLAVE_BUSY or MODBUS_SLAVE_EX_SLAVE_DEVICE_FAILURE: the
  * stack never defers a response to another context.
@@ -232,7 +232,7 @@ typedef struct modbus_slave {
     uint8_t pending_address; /**< Address waiting to take effect. */
     uint8_t address_pending; /**< pending_address is valid. */
 
-    /* ---- server backend attachment ---- */
+    /* ---- backend attachment ---- */
     modbus_slave_event_port_t event_port;
 
     /* ---- runtime state (private) ---- */
@@ -272,7 +272,7 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
                                         const modbus_slave_config_t* config);
 
 /**
- * @brief Attach the server backend's event callbacks.
+ * @brief Attach the backend's event callbacks.
  *
  * Must be called before modbus_slave_start(); afterwards it returns
  * MODBUS_SLAVE_ERR_STATE. Calling it again after modbus_slave_stop() is
@@ -325,7 +325,7 @@ modbus_slave_status_t modbus_slave_tx_ready(modbus_slave_t* me);
 /** Report UART TC (transmission complete). Closes TX, reopens RX, notifies the backend. */
 modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me);
 
-/* Primitives for the server backend --------------------------------------- */
+/* Primitives for the backend --------------------------------------- */
 
 /**
  * @brief Validate the received ADU and capture the request.

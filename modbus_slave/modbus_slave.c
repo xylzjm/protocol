@@ -3,7 +3,7 @@
 #include "modbus_slave_internal.h"
 
 /* Core object: construction, lifecycle, the receive/execute/send primitives
- * the server backend drives, the ISR entry points, the event port and the
+ * the backend drives, the ISR entry points, the event port and the
  * configuration helpers. */
 
 /* T3.5 -------------------------------------------------------------------- */

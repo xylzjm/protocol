@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "modbus_slave_server_qp.h"
+#include "modbus_slave_qp.h"
 
-/* QP/C server backend: a three-state QHsm (STOPPED/IDLE/SENDING) that the
+/* QP/C backend: a three-state QHsm (STOPPED/IDLE/SENDING) that the
  * application AO drives with QASM_DISPATCH(). The protocol events arrive
  * through the core's event port, which posts them directly to this channel's
  * AO — directed posting, never publish, so two channels cannot cross-talk.
@@ -15,50 +15,50 @@
  *      +-----------------+  +----------------------------+
  */
 
-static QState server_initial(modbus_slave_server_qp_t* const me,
-                             void const* const par);
-static QState server_stopped(modbus_slave_server_qp_t* const me,
-                             QEvt const* const e);
-static QState server_idle(modbus_slave_server_qp_t* const me,
-                          QEvt const* const e);
-static QState server_sending(modbus_slave_server_qp_t* const me,
-                             QEvt const* const e);
+static QState modbus_slave_qp_initial(modbus_slave_qp_t* const me,
+                                      void const* const par);
+static QState modbus_slave_qp_stopped(modbus_slave_qp_t* const me,
+                                      QEvt const* const e);
+static QState modbus_slave_qp_idle(modbus_slave_qp_t* const me,
+                                   QEvt const* const e);
+static QState modbus_slave_qp_sending(modbus_slave_qp_t* const me,
+                                      QEvt const* const e);
 
 /* Event port: core ISR -> application AO --------------------------------- */
 
-static void server_frame_received(void* ctx)
+static void modbus_slave_qp_frame_received(void* ctx)
 {
-    modbus_slave_server_qp_t* me = (modbus_slave_server_qp_t*)ctx;
-    static QEvt const evt        = QEVT_INITIALIZER(MB_FRAME_RCVED_SIG);
+    modbus_slave_qp_t* me = (modbus_slave_qp_t*)ctx;
+    static QEvt const evt = QEVT_INITIALIZER(MB_FRAME_RCVED_SIG);
 
     QACTIVE_POST(me->app, &evt, 0);
 }
 
-static void server_frame_sent(void* ctx)
+static void modbus_slave_qp_frame_sent(void* ctx)
 {
-    modbus_slave_server_qp_t* me = (modbus_slave_server_qp_t*)ctx;
-    static QEvt const evt        = QEVT_INITIALIZER(MB_FRAME_SENT_SIG);
+    modbus_slave_qp_t* me = (modbus_slave_qp_t*)ctx;
+    static QEvt const evt = QEVT_INITIALIZER(MB_FRAME_SENT_SIG);
 
     QACTIVE_POST(me->app, &evt, 0);
 }
 
-static void server_tx_timeout(void* ctx)
+static void modbus_slave_qp_tx_timeout(void* ctx)
 {
-    modbus_slave_server_qp_t* me = (modbus_slave_server_qp_t*)ctx;
-    static QEvt const evt        = QEVT_INITIALIZER(MB_TX_TIMEOUT_SIG);
+    modbus_slave_qp_t* me = (modbus_slave_qp_t*)ctx;
+    static QEvt const evt = QEVT_INITIALIZER(MB_TX_TIMEOUT_SIG);
 
     QACTIVE_POST(me->app, &evt, 0);
 }
 
 /* Construction ------------------------------------------------------------ */
 
-void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
-                                 modbus_slave_t* slave,
-                                 QActive* app)
+void modbus_slave_qp_ctor(modbus_slave_qp_t* me,
+                          modbus_slave_t* slave,
+                          QActive* app)
 {
     modbus_slave_event_port_t event_port;
 
-    QHsm_ctor(&me->super, Q_STATE_CAST(&server_initial));
+    QHsm_ctor(&me->super, Q_STATE_CAST(&modbus_slave_qp_initial));
     me->slave      = slave;
     me->app        = app;
     me->last_error = 0U;
@@ -70,9 +70,9 @@ void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
     }
 
     event_port.ctx               = me;
-    event_port.on_frame_received = server_frame_received;
-    event_port.on_frame_sent     = server_frame_sent;
-    event_port.on_tx_timeout     = server_tx_timeout;
+    event_port.on_frame_received = modbus_slave_qp_frame_received;
+    event_port.on_frame_sent     = modbus_slave_qp_frame_sent;
+    event_port.on_tx_timeout     = modbus_slave_qp_tx_timeout;
 
     if ( modbus_slave_set_event_port(slave, &event_port)
          != MODBUS_SLAVE_OK ) {
@@ -83,37 +83,37 @@ void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
     }
 }
 
-void modbus_slave_server_qp_init(modbus_slave_server_qp_t* me)
+void modbus_slave_qp_init(modbus_slave_qp_t* me)
 {
     QASM_INIT(&me->super, NULL, 0u);
 }
 
-uint8_t modbus_slave_server_qp_tx_timeout_count(
-    const modbus_slave_server_qp_t* me)
+uint8_t modbus_slave_qp_tx_timeout_count(
+    const modbus_slave_qp_t* me)
 {
     return (me != NULL) ? me->last_error : 0U;
 }
 
 /* States ------------------------------------------------------------------ */
 
-static QState server_initial(modbus_slave_server_qp_t* const me,
-                             void const* const par)
+static QState modbus_slave_qp_initial(modbus_slave_qp_t* const me,
+                                      void const* const par)
 {
     Q_UNUSED_PAR(par);
 
     if ( me->fault != 0U ) {
         /* Construction could not attach the event port (or an argument was
          * NULL): never start a core this backend cannot hear. */
-        return Q_TRAN(&server_stopped);
+        return Q_TRAN(&modbus_slave_qp_stopped);
     }
 
     /* Idle's entry applies the pending configuration and starts the core,
      * so the slave is in service as soon as the initial transition lands. */
-    return Q_TRAN(&server_idle);
+    return Q_TRAN(&modbus_slave_qp_idle);
 }
 
-static QState server_stopped(modbus_slave_server_qp_t* const me,
-                             QEvt const* const e)
+static QState modbus_slave_qp_stopped(modbus_slave_qp_t* const me,
+                                      QEvt const* const e)
 {
     switch ( e->sig ) {
         case Q_ENTRY_SIG:
@@ -124,7 +124,7 @@ static QState server_stopped(modbus_slave_server_qp_t* const me,
             if ( me->fault != 0U ) {
                 return Q_HANDLED(); /* half-wired: stay down */
             }
-            return Q_TRAN(&server_idle);
+            return Q_TRAN(&modbus_slave_qp_idle);
 
         case MB_CONFIG_SIG:
             /* Keep the pending address in the core; the idle entry applies
@@ -136,8 +136,8 @@ static QState server_stopped(modbus_slave_server_qp_t* const me,
     }
 }
 
-static QState server_idle(modbus_slave_server_qp_t* const me,
-                          QEvt const* const e)
+static QState modbus_slave_qp_idle(modbus_slave_qp_t* const me,
+                                   QEvt const* const e)
 {
     switch ( e->sig ) {
         case Q_ENTRY_SIG:
@@ -154,7 +154,7 @@ static QState server_idle(modbus_slave_server_qp_t* const me,
                     modbus_slave_execute(me->slave);
                     if ( modbus_slave_send(me->slave)
                          == MODBUS_SLAVE_OK ) {
-                        return Q_TRAN(&server_sending);
+                        return Q_TRAN(&modbus_slave_qp_sending);
                     }
                     /* send() refused: reopen RX so the bus is not left
                      * deaf, then keep waiting for the next request. */
@@ -179,7 +179,7 @@ static QState server_idle(modbus_slave_server_qp_t* const me,
             return Q_HANDLED();
 
         case MB_STOP_SIG:
-            return Q_TRAN(&server_stopped);
+            return Q_TRAN(&modbus_slave_qp_stopped);
 
         /* Stale completion events from a transmission that is already
          * over (e.g. a TX timeout racing the TC interrupt): ignore. */
@@ -190,12 +190,12 @@ static QState server_idle(modbus_slave_server_qp_t* const me,
     }
 }
 
-static QState server_sending(modbus_slave_server_qp_t* const me,
-                             QEvt const* const e)
+static QState modbus_slave_qp_sending(modbus_slave_qp_t* const me,
+                                      QEvt const* const e)
 {
     switch ( e->sig ) {
         case MB_FRAME_SENT_SIG:
-            return Q_TRAN(&server_idle);
+            return Q_TRAN(&modbus_slave_qp_idle);
 
         case MB_TX_TIMEOUT_SIG:
             /* The watchdog already stopped the byte stream; abandon the
@@ -204,10 +204,10 @@ static QState server_sending(modbus_slave_server_qp_t* const me,
             if ( me->last_error < 0xFFU ) {
                 me->last_error++;
             }
-            return Q_TRAN(&server_idle);
+            return Q_TRAN(&modbus_slave_qp_idle);
 
         case MB_STOP_SIG:
-            return Q_TRAN(&server_stopped);
+            return Q_TRAN(&modbus_slave_qp_stopped);
 
         case MB_CONFIG_SIG:
             /* Leave the pending address stored; the next idle entry

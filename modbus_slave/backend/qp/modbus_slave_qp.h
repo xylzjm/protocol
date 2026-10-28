@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#ifndef MODBUS_SLAVE_SERVER_QP_H
-#define MODBUS_SLAVE_SERVER_QP_H
+#ifndef MODBUS_SLAVE_QP_H
+#define MODBUS_SLAVE_QP_H
 
 /**
- * @file modbus_slave_server_qp.h
- * @brief QP/C (QHsm) server backend for the modbus_slave core.
+ * @file modbus_slave_qp.h
+ * @brief QP/C (QHsm) backend for the modbus_slave core.
  *
  * The backend is a QHsm component, not an active object: the application AO
  * of each channel owns it and dispatches protocol events into it with
@@ -20,11 +20,11 @@
  * @code
  * typedef struct {
  *     QActive super;                    // offset 0
- *     modbus_slave_server_qp_t server;  // QHsm, holds the core pointer
+ *     modbus_slave_qp_t backend;        // QHsm, holds the core pointer
  * } ModbusApp;
  *
  * // in the app state handling MB_* signals:
- * QASM_DISPATCH(&me->server.super, e, 0u);
+ * QASM_DISPATCH(&me->backend.super, e, 0u);
  * @endcode
  *
  * The AO's event queue must hold at least 8 events so the three ISR-posted
@@ -35,14 +35,14 @@
 #include "qpc.h"
 
 /**
- * @brief Signals the application AO must dispatch into the server HSM.
+ * @brief Signals the application AO must dispatch into the backend HSM.
  *
  * MB_FRAME_RCVED_SIG / MB_FRAME_SENT_SIG / MB_TX_TIMEOUT_SIG are posted by
  * the backend's event port from interrupt context; MB_START_SIG /
  * MB_STOP_SIG / MB_CONFIG_SIG are posted by the application. Applications
  * define their own signals starting at MB_APP_SIG_BASE.
  */
-enum ModbusSlaveServerQpSignals {
+enum ModbusSlaveQpSignals {
     MB_FRAME_RCVED_SIG = Q_USER_SIG, /**< A frame completed; process it. */
     MB_FRAME_SENT_SIG,               /**< The response went out on the wire. */
     MB_TX_TIMEOUT_SIG,               /**< Transmission watchdog expired. */
@@ -53,7 +53,7 @@ enum ModbusSlaveServerQpSignals {
 };
 
 /**
- * @brief Server backend instance, embedded in the application AO.
+ * @brief Backend instance, embedded in the application AO.
  *
  * Members are private; only the functions declared here may touch them.
  */
@@ -63,7 +63,7 @@ typedef struct {
     QActive* app;          /**< This channel's AO, receives the events. */
     uint8_t last_error;    /**< Saturating count of TX timeouts; see tx_timeout_count(). */
     uint8_t fault;         /**< Non-zero: construction failed; never start the core. */
-} modbus_slave_server_qp_t;
+} modbus_slave_qp_t;
 
 /**
  * @brief Construct the backend and attach it to the core's event port.
@@ -76,9 +76,9 @@ typedef struct {
  * port cannot be attached, the backend records a fault and stays in
  * STOPPED: init() will not start the core and MB_START_SIG is ignored.
  */
-void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
-                                 modbus_slave_t* slave,
-                                 QActive* app);
+void modbus_slave_qp_ctor(modbus_slave_qp_t* me,
+                          modbus_slave_t* slave,
+                          QActive* app);
 
 /**
  * @brief Run the initial transition (QASM_INIT).
@@ -94,7 +94,7 @@ void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
  * construction faulted, the backend enters STOPPED and never starts the
  * core.
  */
-void modbus_slave_server_qp_init(modbus_slave_server_qp_t* me);
+void modbus_slave_qp_init(modbus_slave_qp_t* me);
 
 /**
  * @brief Number of TX watchdog expiries since construction, saturating at 255.
@@ -103,7 +103,7 @@ void modbus_slave_server_qp_init(modbus_slave_server_qp_t* me);
  * (for example a baudrate mismatch or a stuck DE line). Returns 0 for a NULL
  * instance.
  */
-uint8_t modbus_slave_server_qp_tx_timeout_count(
-    const modbus_slave_server_qp_t* me);
+uint8_t modbus_slave_qp_tx_timeout_count(
+    const modbus_slave_qp_t* me);
 
 #endif

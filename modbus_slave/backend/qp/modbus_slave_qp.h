@@ -27,6 +27,11 @@
  * QASM_DISPATCH(&me->backend.super, e, 0u);
  * @endcode
  *
+ * The backend also contributes a block of six signals (MB_*_SIG). The
+ * project's single QP signal header (main.h) composes that block with the
+ * application's own signals; see MODBUS_SLAVE_QP_SIG_BASE and
+ * modbus_slave_qp_signal_t below.
+ *
  * The AO's event queue must hold at least 8 events so the three ISR-posted
  * protocol events can never overflow it (QF_NO_MARGIN).
  */
@@ -35,22 +40,71 @@
 #include "qpc.h"
 
 /**
+ * @brief First value of this backend's signal block.
+ *
+ * Assign it in the build's global macros (the compiler's -D definition), so
+ * every translation unit -- including backend/qp/modbus_slave_qp.c, which
+ * includes this header directly -- sees the same value. The default keeps
+ * the block at Q_USER_SIG.
+ *
+ * The project's signal header (main.h) then includes the block headers in
+ * the same order; the next block, or the application enum, starts at
+ * MB_SIG_NEXT:
+ *
+ * @code
+ * // build macro: -DMODBUS_SLAVE_QP_SIG_BASE=Q_USER_SIG
+ *
+ * // main.h
+ * #include "qpc.h"
+ * #include "modbus_slave_qp.h"      // MB_*_SIG at MODBUS_SLAVE_QP_SIG_BASE
+ *
+ * enum AppSignals {
+ *     SENSOR_DATA_SIG = MB_SIG_NEXT,
+ *     SENSOR_FAULT_SIG,
+ * };
+ * @endcode
+ *
+ * Do not #define it in main.h: a header-only definition reaches only the
+ * files that include main.h, not the backend's own sources.
+ */
+#ifndef MODBUS_SLAVE_QP_SIG_BASE
+#define MODBUS_SLAVE_QP_SIG_BASE (Q_USER_SIG)
+#endif
+
+/**
  * @brief Signals the application AO must dispatch into the backend HSM.
+ *
+ * The block occupies six consecutive values. The project's signal header
+ * (typically main.h) includes this header; the next block, or the application
+ * enum, starts at MB_SIG_NEXT, so every signal in the firmware has a unique
+ * value:
+ *
+ * @code
+ * // main.h
+ * #include "qpc.h"
+ * #include "modbus_slave_qp.h"
+ *
+ * enum AppSignals {
+ *     SENSOR_DATA_SIG = MB_SIG_NEXT,
+ *     SENSOR_FAULT_SIG,
+ * };
+ * @endcode
  *
  * MB_FRAME_RCVED_SIG / MB_FRAME_SENT_SIG / MB_TX_TIMEOUT_SIG are posted by
  * the backend's event port from interrupt context; MB_START_SIG /
- * MB_STOP_SIG / MB_CONFIG_SIG are posted by the application. Applications
- * define their own signals starting at MB_APP_SIG_BASE.
+ * MB_STOP_SIG / MB_CONFIG_SIG are posted by the application.
  */
-enum ModbusSlaveQpSignals {
-    MB_FRAME_RCVED_SIG = Q_USER_SIG, /**< A frame completed; process it. */
-    MB_FRAME_SENT_SIG,               /**< The response went out on the wire. */
-    MB_TX_TIMEOUT_SIG,               /**< Transmission watchdog expired. */
-    MB_START_SIG,                    /**< Enter service: apply pending config. */
-    MB_STOP_SIG,                     /**< Leave service. */
-    MB_CONFIG_SIG,                   /**< Apply the pending configuration. */
-    MB_APP_SIG_BASE                  /**< First application-defined signal. */
-};
+typedef enum {
+    MB_FRAME_RCVED_SIG = MODBUS_SLAVE_QP_SIG_BASE, /**< A frame completed; process it. */
+    MB_FRAME_SENT_SIG,                             /**< The response went out on the wire. */
+    MB_TX_TIMEOUT_SIG,                             /**< Transmission watchdog expired. */
+    MB_START_SIG,                                  /**< Enter service: apply pending config. */
+    MB_STOP_SIG,                                   /**< Leave service. */
+    MB_CONFIG_SIG,                                 /**< Apply the pending configuration. */
+
+    /** First value after this block; the next block or the app starts here. */
+    MB_SIG_NEXT
+} modbus_slave_qp_signal_t;
 
 /**
  * @brief Backend instance, embedded in the application AO.

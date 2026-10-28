@@ -30,12 +30,14 @@ modbus_slave/                      this stack's root
 ├── README.md                      this file
 ├── LICENSE-MIT                    license of the pure C core
 ├── LICENSE-GPL-3.0                license of backend/qp/
-├── modbus_slave.h                 public core API
-├── modbus_slave_internal.h        internal constants/state enums (core only)
-├── modbus_slave.c                 ctor/start/stop, receive/execute/send, ISRs, event port
-├── modbus_slave_rtu.c             RX/TX frame machines, T3.5, TX watchdog, ADU
-├── modbus_slave_pdu.c             the 9 function codes
-├── modbus_slave_crc.c             CRC16/Modbus (256-entry table)
+├── inc/                           core headers
+│   ├── modbus_slave.h             public core API
+│   └── modbus_slave_internal.h    internal constants/state enums (core only)
+├── src/                           pure C core sources
+│   ├── modbus_slave.c             ctor/start/stop, receive/execute/send, ISRs, event port
+│   ├── modbus_slave_rtu.c         RX/TX frame machines, T3.5, TX watchdog, ADU
+│   ├── modbus_slave_pdu.c         the 9 function codes
+│   └── modbus_slave_crc.c         CRC16/Modbus (256-entry table)
 └── backend/                       backends
     ├── qp/                        QP/C (QHsm) backend — GPL-3.0-or-later
     │   ├── modbus_slave_qp.h
@@ -203,8 +205,48 @@ with RX off, and the slave stays deaf until that event is dispatched.
 Signals (from `modbus_slave_qp.h`): `MB_FRAME_RCVED_SIG`,
 `MB_FRAME_SENT_SIG`, `MB_TX_TIMEOUT_SIG` are posted by the backend's event
 port from interrupt context; `MB_START_SIG`, `MB_STOP_SIG`, `MB_CONFIG_SIG`
-are posted by the application. Application-defined signals start at
-`MB_APP_SIG_BASE`.
+are posted by the application.
+
+The backend owns a block of six consecutive signals. To keep QP's "one
+signal enum per firmware" rule while several libraries contribute blocks,
+assign every block's base as a **global build macro** (a compiler `-D`
+definition), so all translation units agree — including
+`backend/qp/modbus_slave_qp.c`, which includes the block header directly:
+
+```text
+MODBUS_SLAVE_QP_SIG_BASE = Q_USER_SIG     (six values)
+OTHER_QP_SIG_BASE        = Q_USER_SIG+6   (the next block)
+```
+
+`MB_SIG_NEXT` is the first value after the block; the application's signals
+start there.
+
+`main.h` then includes the block header and starts the application's signals
+at `MB_SIG_NEXT`:
+
+```c
+/* main.h */
+#include "qpc.h"
+#include "modbus_slave_qp.h"     /* MB_*_SIG: six values */
+
+enum AppSignals {
+    SENSOR_DATA_SIG = MB_SIG_NEXT,
+    SENSOR_FAULT_SIG,
+    /* ... */
+};
+```
+
+If another library's block follows, give it the next free value as its base
+(`Q_USER_SIG+6` with the default base above, which is `MB_SIG_NEXT`) and
+include its header before the application enum; the application then starts
+after that block instead.
+
+Every module that handles the signals includes `main.h`, so the whole
+firmware shares one numbering.
+
+Do not set these bases with `#define` in `main.h`: a header-only definition
+reaches only the files that include it, so the backend's own `.c` would fall
+back to `Q_USER_SIG` and the two sides would use different signal numbers.
 
 Requirements:
 
@@ -266,21 +308,22 @@ AO's queue/stack.
 
 ## Building
 
-The core is four `.c` files plus the two headers; add
-`modbus_slave/*.c` (excluding `backend/`) to any C99 project — no QP
-include paths required. The QP backend additionally needs the QP/C 8.x
-include path and a port (e.g. `ports/arm-cm/qv/gnu` plus
-`ports/arm-cm/config`).
+The core is four `.c` files under `src/` plus the two headers under `inc/`.
+Add `src/*.c` and put `inc/` on the include path — no QP include paths
+required. The QP backend adds `backend/qp/modbus_slave_qp.c`; it additionally
+needs `backend/qp/` on the include path, the QP/C 8.x include path and a port
+(e.g. `ports/arm-cm/qv/gnu` plus `ports/arm-cm/config`).
 
 Reference checks (Arm GCC):
 
 ```sh
 # core only, C99, no QP headers visible
-arm-none-eabi-gcc -std=c99 -Wall -Wextra -Werror -pedantic -I modbus_slave -c modbus_slave*.c
+arm-none-eabi-gcc -std=c99 -Wall -Wextra -Werror -pedantic \
+    -I modbus_slave/inc -c modbus_slave/src/*.c
 
 # QP backend, QP 8.1.3
 arm-none-eabi-gcc -std=c11 -Wall -Wextra -Werror -mcpu=cortex-m4 -mthumb \
-    -I modbus_slave -I modbus_slave/backend/qp \
+    -I modbus_slave/inc -I modbus_slave/backend/qp \
     -I <qpc>/include -I <qpc>/ports/arm-cm/qv/gnu -I <qpc>/ports/arm-cm/config \
     -c modbus_slave/backend/qp/modbus_slave_qp.c
 ```
@@ -290,8 +333,8 @@ the sources are kept format-clean.
 
 ## Licensing
 
-- **Core** (`modbus_slave.h`, `modbus_slave_internal.h`, the four `.c`
-  files): MIT — see `LICENSE-MIT`.
+- **Core** (`inc/modbus_slave.h`, `inc/modbus_slave_internal.h`, `src/*.c`):
+  MIT — see `LICENSE-MIT`.
 - **`backend/qp/`**: GPL-3.0-or-later — see `LICENSE-GPL-3.0`. QP/C itself is
   dual-licensed (GPL or commercial from Quantum Leaps).
 

@@ -1,0 +1,46 @@
+# For more options, open this url: https://clang.llvm.net.cn/docs/ClangFormatStyleOptions.html
+---
+BasedOnStyle: Microsoft
+IndentWidth: 4
+UseTab: Never
+TabWidth: 4
+ColumnLimit: 0
+AccessModifierOffset: -4
+NamespaceIndentation: All
+FixNamespaceComments: false
+# BreakBeforeBraces: Linux
+BreakBeforeBraces: Custom
+BraceWrapping:
+    AfterClass: false
+    AfterControlStatement: MultiLine
+    AfterEnum: false
+    AfterFunction: true
+    AfterNamespace: false
+    AfterStruct: false
+    AfterUnion: false
+    AfterExternBlock: false
+    BeforeCatch: true
+    BeforeElse: false
+    BeforeLambdaBody: false
+    IndentBraces: false
+PointerAlignment: Left
+DerivePointerAlignment: false
+BinPackParameters: AlwaysOnePerLine
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+IndentCaseLabels: true
+# SortIncludes: false
+AlignConsecutiveMacros: AcrossEmptyLines
+AlignConsecutiveAssignments: Consecutive
+BreakBeforeBinaryOperators: NonAssignment
+AllowShortCaseLabelsOnASingleLine: true
+AlignConsecutiveShortCaseStatements:
+    Enabled: true
+    AcrossEmptyLines: false    # 空行是否仍参与对齐
+    AcrossComments: false      # 注释行是否仍参与对齐
+    AlignCaseColons: false     # 关键：对齐冒号后面的语句，而不是对齐冒号本身
+SpacesInParens: Custom
+SpacesInParensOptions:
+    InConditionalStatements: true

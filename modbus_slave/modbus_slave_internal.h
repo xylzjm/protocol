@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 #ifndef MODBUS_SLAVE_INTERNAL_H
 #define MODBUS_SLAVE_INTERNAL_H
 

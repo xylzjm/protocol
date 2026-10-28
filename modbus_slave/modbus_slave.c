@@ -1,6 +1,6 @@
-#include "modbus_slave_internal.h"
-
 /* SPDX-License-Identifier: MIT */
+
+#include "modbus_slave_internal.h"
 
 /* Core object: construction, lifecycle, the receive/execute/send primitives
  * the server backend drives, the ISR entry points, the event port and the
@@ -149,6 +149,7 @@ modbus_slave_status_t modbus_slave_set_event_port(
 modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 {
     uint32_t token;
+    uint8_t failed = 0U;
 
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
@@ -162,25 +163,46 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
         me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
         me->rx_pos   = 0U;
 
+        /* Set the mode before touching the timer: an expiry that lands
+         * immediately must already find the matching mode. */
+        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
+
         /* Open reception and wait out one T3.5 of bus idle, so a frame that
          * was already in flight cannot be mistaken for a complete one. */
-        (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
-        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
+        if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
+             != MODBUS_SLAVE_OK ) {
+            failed = 1U;
+        }
+        if ( me->port.timer_enable(me->port.ctx, me->t35_us)
+             != MODBUS_SLAVE_OK ) {
+            failed = 1U;
+        }
+
+        if ( failed != 0U ) {
+            /* Roll the half-started instance back so a retry starts clean. */
+            me->started    = 0U;
+            me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
+            (void)me->port.timer_disable(me->port.ctx);
+            (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
+        }
     } else if ( me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_INIT
                 || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE ) {
         /* Idempotent re-entry (e.g. the backend's IDLE entry): make sure
          * reception is on without disturbing a frame in collection. */
-        (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+        if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
+             != MODBUS_SLAVE_OK ) {
+            failed = 1U;
+        }
     }
 
     me->port.critical_exit(me->port.ctx, token);
-    return MODBUS_SLAVE_OK;
+    return (failed != 0U) ? MODBUS_SLAVE_ERR_IO : MODBUS_SLAVE_OK;
 }
 
 modbus_slave_status_t modbus_slave_stop(modbus_slave_t* me)
 {
     uint32_t token;
+    uint8_t failed = 0U;
 
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
@@ -194,11 +216,15 @@ modbus_slave_status_t modbus_slave_stop(modbus_slave_t* me)
     me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
     me->rx_pos     = 0U;
 
-    (void)me->port.timer_disable(me->port.ctx);
-    (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
+    if ( me->port.timer_disable(me->port.ctx) != MODBUS_SLAVE_OK ) {
+        failed = 1U;
+    }
+    if ( me->port.serial_enable(me->port.ctx, 0U, 0U) != MODBUS_SLAVE_OK ) {
+        failed = 1U;
+    }
 
     me->port.critical_exit(me->port.ctx, token);
-    return MODBUS_SLAVE_OK;
+    return (failed != 0U) ? MODBUS_SLAVE_ERR_IO : MODBUS_SLAVE_OK;
 }
 
 /* ISR entry points -------------------------------------------------------- */
@@ -329,6 +355,11 @@ modbus_slave_status_t modbus_slave_send(modbus_slave_t* me)
     if ( me->started == 0U
          || me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE
          || me->response_len == 0U ) {
+        return MODBUS_SLAVE_ERR_STATE;
+    }
+    /* A broadcast is never answered: execute() may have built a PDU for the
+     * callbacks, but it must not reach the wire. */
+    if ( me->broadcast != 0U ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 

@@ -1,6 +1,6 @@
-#include "modbus_slave_internal.h"
-
 /* SPDX-License-Identifier: MIT */
+
+#include "modbus_slave_internal.h"
 
 /* RTU framing: RX/TX frame machines, the T3.5 inter-frame timer and the TX
  * watchdog. This module never touches the PDU: it only decides when a frame
@@ -11,6 +11,13 @@
 void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
                               uint8_t byte)
 {
+    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+        /* A stray byte (late RXNE, DE switching glitch, or a port that did
+         * not fully mute the receiver) must neither start a frame nor
+         * replace the TX watchdog while a response is on the wire. */
+        return;
+    }
+
     switch ( (enum modbus_slave_rx_state)me->rx_state ) {
         case MODBUS_SLAVE_RX_STATE_INIT:
             /* The bus has not been idle for T3.5 yet, so the frame edge is
@@ -48,8 +55,8 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
     if ( me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_INIT
          || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_RCV
          || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_ERROR ) {
-        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
         me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
+        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
     }
 }
 
@@ -140,8 +147,9 @@ void modbus_slave_rtu_send(modbus_slave_t* me)
     me->tx_buffer[me->response_len + 1U] = (uint8_t)(crc & 0xFFU);
     me->tx_buffer[me->response_len + 2U] = (uint8_t)(crc >> 8);
 
-    me->tx_len = (uint16_t)(me->response_len + 3U);
-    me->tx_pos = 0U;
+    me->tx_len       = (uint16_t)(me->response_len + 3U);
+    me->tx_pos       = 0U;
+    me->response_len = 0U; /* consumed: a second send() is rejected */
 
     /* 11 bit times per byte (start + 8 data + parity + stop) plus 10 ms of
      * margin. 64-bit math first: at low baud rates the 32-bit product would
@@ -150,10 +158,11 @@ void modbus_slave_rtu_send(modbus_slave_t* me)
                                / me->baudrate)
                     + 10000U;
 
-    /* Arm the watchdog before enabling TX so no byte can go out unprotected. */
-    me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT;
-    (void)me->port.timer_enable(me->port.ctx, tx_timeout_us);
+    /* Arm the watchdog before enabling TX so no byte can go out unprotected.
+     * Set its mode first: an expiry that lands immediately must find it. */
+    me->tx_state   = (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT;
     me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT;
+    (void)me->port.timer_enable(me->port.ctx, tx_timeout_us);
 
     /* RX off, DE on, TC cleared, TXE+TC interrupts enabled: the TXE
      * interrupt that follows delivers the first byte through tx_ready(). */

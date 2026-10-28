@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 #ifndef MODBUS_SLAVE_H
 #define MODBUS_SLAVE_H
 
@@ -70,9 +72,12 @@ typedef enum {
  * All six operations are required: modbus_slave_ctor() rejects a port that
  * leaves any of them NULL.
  *
- * - serial_enable(rx, tx): rx=1 enables reception and releases the RS485
- *   driver-enable (DE); tx=1 asserts DE, enables TXE+TC interrupts and clears
- *   TC; (0,0) disables both directions and releases DE.
+ * - serial_enable(rx, tx): rx=1 enables reception, releases the RS485
+ *   driver-enable (DE), and disables the TXE and TC interrupts (clearing a
+ *   pending TC), so a finished transmission cannot keep interrupting;
+ *   tx=1 asserts DE, clears TC and enables the TXE+TC interrupts; (0,0)
+ *   disables both directions and releases DE. Each call must leave the
+ *   direction it does not select switched off.
  * - put_byte(byte): writes one byte to the UART data register, non-blocking,
  *   called only from the TXE interrupt.
  * - timer_enable(timeout_us): arms the one-shot inter-frame/TX timer; when it
@@ -237,7 +242,7 @@ typedef struct modbus_slave {
 
     uint16_t rx_pos;       /**< Bytes of the current ADU in rx_buffer. */
     uint16_t pdu_len;      /**< Request PDU length. */
-    uint16_t response_len; /**< Response PDU length. */
+    uint16_t response_len; /**< Built response PDU length; 0 when none is pending. */
     uint16_t tx_len;       /**< ADU length being transmitted. */
     uint16_t tx_pos;       /**< Index of the next byte to transmit. */
 
@@ -253,7 +258,10 @@ typedef struct modbus_slave {
  * @brief Construct a slave instance.
  *
  * Copies the configuration into @p me and derives T3.5 from the baudrate.
- * No hardware is touched. Returns MODBUS_SLAVE_ERR_ARG when @p me or
+ * No hardware is touched. The instance must not be running: call
+ * modbus_slave_stop() first if it is.
+ *
+ * Returns MODBUS_SLAVE_ERR_ARG when @p me or
  * @p config is NULL, the address is outside 1..247, the baudrate is 0, a
  * buffer is NULL or smaller than 256 bytes, the two buffers overlap, any of
  * the six port operations is NULL, any of the four callbacks is NULL, or the
@@ -267,9 +275,10 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
  * @brief Attach the server backend's event callbacks.
  *
  * Must be called before modbus_slave_start(); afterwards it returns
- * MODBUS_SLAVE_ERR_STATE. The struct is copied. @p event_port may be NULL,
- * which detaches any previously attached port: the core keeps working but
- * drops all events.
+ * MODBUS_SLAVE_ERR_STATE. Calling it again after modbus_slave_stop() is
+ * allowed and replaces the port. The struct is copied. @p event_port may be
+ * NULL, which detaches any previously attached port: the core keeps working
+ * but drops all events.
  */
 modbus_slave_status_t modbus_slave_set_event_port(
     modbus_slave_t* me,
@@ -282,6 +291,10 @@ modbus_slave_status_t modbus_slave_set_event_port(
  * entry action of a backend's "idle" state. The RX frame machine waits one
  * T3.5 of bus idle before accepting a frame, so a frame already in flight
  * when the slave starts cannot be mistaken for a complete one.
+ *
+ * Returns MODBUS_SLAVE_ERR_IO when the port failed to switch the serial
+ * direction or to arm the inter-frame timer. The instance then stays
+ * stopped (a first start is rolled back); call stop() and retry.
  */
 modbus_slave_status_t modbus_slave_start(modbus_slave_t* me);
 
@@ -290,6 +303,10 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me);
  *
  * The RX machine returns to its initial state, so a later start()
  * resynchronizes on bus idle again.
+ *
+ * Returns MODBUS_SLAVE_ERR_IO when the port failed to stop the timer or the
+ * serial port; the software state is reset either way, so the caller may
+ * still start() again.
  */
 modbus_slave_status_t modbus_slave_stop(modbus_slave_t* me);
 
@@ -328,8 +345,8 @@ modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me);
  *
  * Runs the data callbacks for the matching function code and writes the
  * response PDU (or exception response) to the transmit buffer. For a
- * broadcast the response is built but must be discarded: the backend simply
- * does not call modbus_slave_send().
+ * broadcast the response is built but must be discarded: modbus_slave_send()
+ * refuses it, and the backend re-opens reception instead.
  */
 void modbus_slave_execute(modbus_slave_t* me);
 
@@ -337,9 +354,13 @@ void modbus_slave_execute(modbus_slave_t* me);
  * @brief Wrap the response PDU in an ADU and start transmitting it.
  *
  * Prepends the slave address, appends the CRC and switches the serial port
- * to transmit. Transmission is driven by the TXE/TC interrupts. Returns
- * MODBUS_SLAVE_ERR_STATE when a transmission is already in progress or no
- * response has been built.
+ * to transmit. Transmission is driven by the TXE/TC interrupts. The built
+ * response is consumed by the call, so a second send() without a fresh
+ * execute() is rejected.
+ *
+ * Returns MODBUS_SLAVE_ERR_STATE when a transmission is already in progress,
+ * no response has been built, or the pending request was a broadcast (a
+ * broadcast is never answered, even if execute() built a PDU for it).
  */
 modbus_slave_status_t modbus_slave_send(modbus_slave_t* me);
 

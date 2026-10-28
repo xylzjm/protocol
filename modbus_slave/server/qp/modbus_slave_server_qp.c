@@ -1,6 +1,6 @@
-#include "modbus_slave_server_qp.h"
-
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+
+#include "modbus_slave_server_qp.h"
 
 /* QP/C server backend: a three-state QHsm (STOPPED/IDLE/SENDING) that the
  * application AO drives with QASM_DISPATCH(). The protocol events arrive
@@ -62,18 +62,36 @@ void modbus_slave_server_qp_ctor(modbus_slave_server_qp_t* me,
     me->slave      = slave;
     me->app        = app;
     me->last_error = 0U;
+    me->fault      = 0U;
+
+    if ( slave == NULL || app == NULL ) {
+        me->fault = 1U;
+        return;
+    }
 
     event_port.ctx               = me;
     event_port.on_frame_received = server_frame_received;
     event_port.on_frame_sent     = server_frame_sent;
     event_port.on_tx_timeout     = server_tx_timeout;
 
-    (void)modbus_slave_set_event_port(slave, &event_port);
+    if ( modbus_slave_set_event_port(slave, &event_port)
+         != MODBUS_SLAVE_OK ) {
+        /* The core was already started: it could never report a frame to
+         * this backend. Refuse to run blind instead of silently missing
+         * every event. */
+        me->fault = 1U;
+    }
 }
 
 void modbus_slave_server_qp_init(modbus_slave_server_qp_t* me)
 {
     QASM_INIT(&me->super, NULL, 0u);
+}
+
+uint8_t modbus_slave_server_qp_tx_timeout_count(
+    const modbus_slave_server_qp_t* me)
+{
+    return (me != NULL) ? me->last_error : 0U;
 }
 
 /* States ------------------------------------------------------------------ */
@@ -82,6 +100,12 @@ static QState server_initial(modbus_slave_server_qp_t* const me,
                              void const* const par)
 {
     Q_UNUSED_PAR(par);
+
+    if ( me->fault != 0U ) {
+        /* Construction could not attach the event port (or an argument was
+         * NULL): never start a core this backend cannot hear. */
+        return Q_TRAN(&server_stopped);
+    }
 
     /* Idle's entry applies the pending configuration and starts the core,
      * so the slave is in service as soon as the initial transition lands. */
@@ -97,6 +121,9 @@ static QState server_stopped(modbus_slave_server_qp_t* const me,
             return Q_HANDLED();
 
         case MB_START_SIG:
+            if ( me->fault != 0U ) {
+                return Q_HANDLED(); /* half-wired: stay down */
+            }
             return Q_TRAN(&server_idle);
 
         case MB_CONFIG_SIG:

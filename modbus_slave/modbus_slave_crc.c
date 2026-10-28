@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 #include "modbus_slave_internal.h"
 
 /* CRC16/Modbus: polynomial 0x8005 reflected to 0xA001, initial value 0xFFFF,

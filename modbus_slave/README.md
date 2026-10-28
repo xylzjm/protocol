@@ -76,7 +76,7 @@ Two capability interfaces cross the boundaries:
 
 | Operation | Context | Contract |
 |---|---|---|
-| `serial_enable(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE. `tx=1`: assert DE, enable TXE+TC, clear TC. `(0,0)`: disable both, release DE. |
+| `serial_enable(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE, disable the TXE/TC interrupts and clear a pending TC. `tx=1`: assert DE, clear TC, enable TXE+TC. `(0,0)`: disable both, release DE. |
 | `put_byte(byte)` | TXE ISR | Write the UART data register, non-blocking. |
 | `timer_enable(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). |
 | `timer_disable()` | task / ISR | Stop and clear. |
@@ -88,6 +88,12 @@ Notes the board implementation must respect:
   done when TC sets. Clear TC and enable the TC interrupt before starting a
   transmission. TXE fires once more after the last byte is loaded — the core
   tolerates it and simply emits nothing.
+- **Mute the transmitter interrupts**: `serial_enable(1, 0)` must also
+  disable TXEIE/TCIE. One extra TXE is expected and ignored, but a port that
+  leaves TXEIE enabled would keep interrupting on the empty data register.
+- `modbus_slave_start()` and `modbus_slave_stop()` return
+  `MODBUS_SLAVE_ERR_IO` when a port operation fails; a failed first start is
+  rolled back, so the caller can retry.
 - `modbus_slave_tx_complete()` (TC interrupt) closes TX, reopens RX and
   notifies `on_frame_sent`.
 
@@ -115,6 +121,14 @@ plus a shared `ctx`:
 
 - Broadcast (address 0): `05`/`06`/`0F`/`10` execute without a response;
   `01`/`02`/`03`/`04`/`11` are ignored without invoking callbacks.
+- A broadcast is never answered: `modbus_slave_send()` refuses a broadcast
+  response even when `execute()` has built one, so every backend gets that
+  guarantee from the core itself.
+- Report Slave ID (0x11) answers with `slave_id`, the run indicator
+  (`0xFF`/`0x00`) and up to 249 additional bytes; the constructor rejects
+  `identity.additional_length > 249`. The additional bytes are caller-owned
+  — only the pointer is copied, so they must outlive the instance and must
+  not change afterwards. `modbus_slave_set_running()` sets the indicator.
 - CRC error, frame shorter than 4 bytes, foreign address: silently dropped.
 - Exception response: `[addr][func|0x80][exception][crc]`, unicast only.
 - T3.5 = 3.5 character times: `(38500000 + baud − 1) / baud` µs up to
@@ -160,20 +174,31 @@ STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
 
 | State | Event | Action | Next |
 |---|---|---|---|
-| STOPPED | START | `start()` + apply pending config (via idle entry) | IDLE |
+| STOPPED | START | `start()` + apply pending config (via idle entry); ignored if construction faulted | IDLE |
 | STOPPED | CONFIG | keep pending | STOPPED |
 | IDLE | FRAME_RCVED | `receive()`; IGNORE ⇒ `enable_rx`; BROADCAST ⇒ `execute()`+`enable_rx`; UNICAST ⇒ `execute()`+`send()` | IDLE / SENDING |
 | IDLE | CONFIG | RX off, apply config, RX on | IDLE |
 | IDLE | STOP | `stop()` | STOPPED |
 | IDLE | FRAME_SENT / TX_TIMEOUT | ignore (stale) | IDLE |
 | SENDING | FRAME_SENT | — | IDLE |
-| SENDING | TX_TIMEOUT | `abort_tx()`, count in `last_error` | IDLE |
+| SENDING | TX_TIMEOUT | `abort_tx()`, increment `last_error` (readable with `modbus_slave_server_qp_tx_timeout_count()`) | IDLE |
 | SENDING | STOP | `stop()` | STOPPED |
 | SENDING | CONFIG | keep pending | SENDING |
 | SENDING | FRAME_RCVED | ignore | SENDING |
 
 The initial transition lands in `IDLE`, whose entry applies the pending
 configuration and starts the core.
+
+Call `modbus_slave_server_qp_init()` once, **after** `QACTIVE_START()` (or
+from the AO's own initial transition). `QACTIVE_START()` is what gives the
+AO its priority and event queue, so initializing earlier would open the bus
+before an ISR-posted protocol event has a valid target. If the backend was
+constructed with a NULL core/AO, or against a core that is already started,
+it records a fault, stays in `STOPPED`, and ignores `MB_START_SIG`.
+
+The AO must forward the six signals in **every** state it can be in while the
+slave is in service. An `MB_FRAME_RCVED_SIG` left in the queue keeps the core
+with RX off, and the slave stays deaf until that event is dispatched.
 
 Signals (from `modbus_slave_server_qp.h`): `MB_FRAME_RCVED_SIG`,
 `MB_FRAME_SENT_SIG`, `MB_TX_TIMEOUT_SIG` are posted by the backend's event

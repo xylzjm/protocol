@@ -1,6 +1,6 @@
-#include "modbus_slave_internal.h"
-
 /* SPDX-License-Identifier: MIT */
+
+#include "modbus_slave_internal.h"
 
 /* PDU execution: the nine supported function codes plus the exception path.
  * execute() builds the response PDU into tx_buffer[1..]; send() later wraps
@@ -35,7 +35,7 @@ static uint8_t request_byte_count(const modbus_slave_t* me)
                          + MODBUS_SLAVE_PDU_BYTE_COUNT_OFFSET];
 }
 
-/* Data payload of 0x0F/0x10 requests: byte count included. */
+/* Data payload of 0x0F/0x10 requests: first data byte, after the byte count. */
 static uint8_t* request_data(modbus_slave_t* me)
 {
     return &me->rx_buffer[MODBUS_SLAVE_ADU_PDU_OFFSET
@@ -183,7 +183,8 @@ static void write_multiple_coils(modbus_slave_t* me)
     uint16_t expected;
     modbus_slave_exception_t exception;
 
-    if ( me->pdu_len < 6U ) {
+    /* Function + start + quantity + byte count + at least one data byte. */
+    if ( me->pdu_len < 7U ) {
         make_exception(me, MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
         return;
     }
@@ -217,7 +218,8 @@ static void write_multiple_registers(modbus_slave_t* me)
     uint16_t expected;
     modbus_slave_exception_t exception;
 
-    if ( me->pdu_len < 6U ) {
+    /* Function + start + quantity + byte count + at least one data byte. */
+    if ( me->pdu_len < 7U ) {
         make_exception(me, MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
         return;
     }

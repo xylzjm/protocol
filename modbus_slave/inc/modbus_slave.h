@@ -335,8 +335,13 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me);
  * MODBUS_SLAVE_RX_IGNORE for anything that must be dropped silently,
  * MODBUS_SLAVE_RX_BROADCAST for an accepted broadcast write (execute it but
  * never respond), and MODBUS_SLAVE_RX_UNICAST for a valid addressed request.
- * Leaves the RX machine in its idle state either way; the backend re-opens
- * reception with modbus_slave_enable_rx() for IGNORE and BROADCAST results.
+ * Leaves the RX machine in its idle state either way.
+ *
+ * Reception window ownership: the T3.5 expiry froze reception before this
+ * call. An IGNORE result (or a stray event, which froze nothing) releases
+ * the window here; BROADCAST hands it to modbus_slave_execute(), UNICAST to
+ * modbus_slave_send() and the TX completion path. Every transaction outcome
+ * releases the window, so a rejected request can never leave the slave deaf.
  */
 modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me);
 
@@ -346,7 +351,9 @@ modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me);
  * Runs the data callbacks for the matching function code and writes the
  * response PDU (or exception response) to the transmit buffer. For a
  * broadcast the response is built but must be discarded: modbus_slave_send()
- * refuses it, and the backend re-opens reception instead.
+ * refuses it, and this function releases the reception window, ending the
+ * broadcast transaction. A unicast keeps the window frozen so the request
+ * buffer cannot change under send().
  */
 void modbus_slave_execute(modbus_slave_t* me);
 
@@ -361,17 +368,16 @@ void modbus_slave_execute(modbus_slave_t* me);
  * Returns MODBUS_SLAVE_ERR_STATE when a transmission is already in progress,
  * no response has been built, or the pending request was a broadcast (a
  * broadcast is never answered, even if execute() built a PDU for it).
+ *
+ * Reception window: when the refusal ends the transaction (no response has
+ * been built), the window is released here. The other refusals leave it to
+ * the path that owns it -- the transmission in progress releases it at
+ * completion/abort, a stopped core needs no window at all.
  */
 modbus_slave_status_t modbus_slave_send(modbus_slave_t* me);
 
 /** Abandon an ongoing transmission and release the bus. Reception re-opens. */
 void modbus_slave_abort_tx(modbus_slave_t* me);
-
-/** Re-enable reception (and release DE). No-op before start(). */
-void modbus_slave_enable_rx(modbus_slave_t* me);
-
-/** Disable reception and assert nothing else; used around configuration changes. */
-void modbus_slave_disable_rx(modbus_slave_t* me);
 
 /**
  * @brief Store a new slave address; it takes effect at the next apply.
@@ -382,7 +388,15 @@ void modbus_slave_disable_rx(modbus_slave_t* me);
 void modbus_slave_set_address_pending(modbus_slave_t* me,
                                       uint8_t address);
 
-/** Apply the pending address, if any. Backends call this in their idle entry. */
+/**
+ * Apply the pending address, if any. Backends call this in their idle entry.
+ *
+ * On a started core the swap runs in its own reception window: reception is
+ * muted, a partially received frame is dropped (the RX machine restarts at
+ * INIT, so the next request begins after a full T3.5 gap) and reception is
+ * re-opened. A mid-frame reconfiguration can therefore never merge stale
+ * bytes into the next request. Before start() only the address changes.
+ */
 void modbus_slave_apply_config(modbus_slave_t* me);
 
 /** Current effective slave address. */

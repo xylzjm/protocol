@@ -1,0 +1,3 @@
+# QM session files — machine-specific (window layout, license location),
+# unlike model.qm which is the versioned source of truth.
+*.qms

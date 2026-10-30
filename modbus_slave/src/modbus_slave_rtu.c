@@ -110,12 +110,22 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
 
 void modbus_slave_rtu_tx_ready(modbus_slave_t* me)
 {
-    /* TXE fires once more after the last byte has been loaded; with nothing
-     * left to send this simply returns instead of closing the port. */
     if ( me->tx_state == (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT
          && me->tx_pos < me->tx_len ) {
         (void)me->port.put_byte(me->port.ctx, me->tx_buffer[me->tx_pos]);
         me->tx_pos++;
+
+        if ( me->tx_pos == me->tx_len ) {
+            /* The last byte is in the data register, so no more TXE is
+             * needed. Mute it now: a level-triggered TXE would otherwise
+             * keep interrupting until TC. TC stays enabled and closes the
+             * frame (releasing DE only when the last bit is out). */
+            (void)me->port.tx_done(me->port.ctx);
+        }
+    } else {
+        /* Nothing left to send: a stray TXE, or the TX watchdog already
+         * moved the machine to IDLE. Mute TXE here as well. */
+        (void)me->port.tx_done(me->port.ctx);
     }
 }
 

@@ -81,6 +81,7 @@ Two capability interfaces cross the boundaries:
 |---|---|---|
 | `serial_enable(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE, disable the TXE/TC interrupts and clear a pending TC. `tx=1`: assert DE, clear TC, enable TXE+TC. `(0,0)`: disable both, release DE. |
 | `put_byte(byte)` | TXE ISR | Write the UART data register, non-blocking. |
+| `tx_done()` | TXE ISR | The core has loaded the last byte (or has nothing left to send). Stop requesting TXE; keep TCIE enabled so the TC path closes the frame and releases DE. |
 | `timer_enable(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). |
 | `timer_disable()` | task / ISR | Stop and clear. |
 | `critical_enter()` / `critical_exit(state)` | ISR / task | Save+disable interrupts / restore. PRIMASK or BASEPRI on QV/QK; `portSET/CLEAR_INTERRUPT_MASK_FROM_ISR` under FreeRTOS+QP. Not `QF_CRIT_ENTRY/EXIT` (default non-saving, non-nesting). |
@@ -89,11 +90,12 @@ Notes the board implementation must respect:
 
 - **TXE vs TC**: TXE only means the data register is empty; the last byte is
   done when TC sets. Clear TC and enable the TC interrupt before starting a
-  transmission. TXE fires once more after the last byte is loaded — the core
-  tolerates it and simply emits nothing.
+  transmission. When the core has loaded the last byte it calls `tx_done()`:
+  the port disables TXEIE there and leaves TCIE enabled, so the TC path closes
+  the frame. There is no trailing empty TXE any more.
 - **Mute the transmitter interrupts**: `serial_enable(1, 0)` must also
-  disable TXEIE/TCIE. One extra TXE is expected and ignored, but a port that
-  leaves TXEIE enabled would keep interrupting on the empty data register.
+  disable TXEIE/TCIE (end of frame). `tx_done()` is the mid-frame mute that
+  keeps TCIE on.
 - `modbus_slave_start()` and `modbus_slave_stop()` return
   `MODBUS_SLAVE_ERR_IO` when a port operation fails; a failed first start is
   rolled back, so the caller can retry.

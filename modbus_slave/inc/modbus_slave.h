@@ -69,7 +69,7 @@ typedef enum {
 /**
  * @brief Hardware operations the core needs from the board.
  *
- * All six operations are required: modbus_slave_ctor() rejects a port that
+ * All seven operations are required: modbus_slave_ctor() rejects a port that
  * leaves any of them NULL.
  *
  * - serial_enable(rx, tx): rx=1 enables reception, releases the RS485
@@ -80,6 +80,10 @@ typedef enum {
  *   direction it does not select switched off.
  * - put_byte(byte): writes one byte to the UART data register, non-blocking,
  *   called only from the TXE interrupt.
+ * - tx_done(): called from the TXE interrupt once the core has loaded the
+ *   last byte (or has nothing left to send). Stop requesting TXE; keep the
+ *   TC interrupt enabled so the TC path can close the frame and release DE.
+ *   This is the port's only chance to mute a level-triggered TXE interrupt.
  * - timer_enable(timeout_us): arms the one-shot inter-frame/TX timer; when it
  *   expires the board must call modbus_slave_timer_expired(). At low baud
  *   rates the timeout can reach several seconds, so the timer has to support
@@ -96,6 +100,7 @@ typedef struct {
                                            uint8_t tx);
     modbus_slave_status_t (*put_byte)(void* ctx,
                                       uint8_t byte);
+    modbus_slave_status_t (*tx_done)(void* ctx);
     modbus_slave_status_t (*timer_enable)(void* ctx,
                                           uint32_t timeout_us);
     modbus_slave_status_t (*timer_disable)(void* ctx);
@@ -264,7 +269,7 @@ typedef struct modbus_slave {
  * Returns MODBUS_SLAVE_ERR_ARG when @p me or
  * @p config is NULL, the address is outside 1..247, the baudrate is 0, a
  * buffer is NULL or smaller than 256 bytes, the two buffers overlap, any of
- * the six port operations is NULL, any of the four callbacks is NULL, or the
+ * the seven port operations is NULL, any of the four callbacks is NULL, or the
  * identity has additional_length > 249 (or a non-NULL length with a NULL
  * pointer).
  */

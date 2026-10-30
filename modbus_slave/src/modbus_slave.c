@@ -51,6 +51,7 @@ static uint8_t config_valid(const modbus_slave_config_t* config)
 
     if ( config->port.serial_enable == NULL
          || config->port.put_byte == NULL
+         || config->port.tx_done == NULL
          || config->port.timer_enable == NULL
          || config->port.timer_disable == NULL
          || config->port.critical_enter == NULL

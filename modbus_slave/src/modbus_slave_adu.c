@@ -2,19 +2,12 @@
 
 #include "modbus_slave_internal.h"
 
-/* RTU frame codec: the only module that knows the layout of an ADU
- * ([address][PDU][CRC16]) and the shape of every request PDU. It reads the
- * receive buffer, writes the transmit buffer, and never touches the port --
- * so decoding is a pure function of the captured bytes. */
-
-/* Request shapes ---------------------------------------------------------- */
-
 typedef struct {
-    uint8_t function;      /**< Wire function code. */
-    uint8_t kind;          /**< enum modbus_slave_request_kind. */
-    uint8_t pdu_length;    /**< Exact PDU length; 0 = variable. */
-    uint16_t quantity_max; /**< 0 = the PDU carries no quantity. */
-    uint8_t units;         /**< 1 = bits, 2 = registers. */
+    uint8_t function;
+    uint8_t kind;
+    uint8_t pdu_length;    /**< Exact length; 0: variable. */
+    uint16_t quantity_max; /**< 0: the PDU carries no quantity. */
+    uint8_t units;         /**< 1: bits, 2: registers. */
 } shape_t;
 
 static const shape_t shapes[] = {
@@ -49,8 +42,6 @@ static const shape_t* find_shape(uint8_t function)
     return NULL;
 }
 
-/* Capture ----------------------------------------------------------------- */
-
 enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
                                                    modbus_slave_request_t* req)
 {
@@ -69,10 +60,6 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
         return MODBUS_SLAVE_CAPTURE_IGNORE;
     }
 
-    /* The address is a question, not stored state: ask it once per frame so a
-     * register write or a DIP-switch change applies to the next one. An
-     * out-of-range answer leaves the slave silent instead of making every
-     * frame look like a broadcast. */
     mine = me->callbacks.address(me->callbacks.ctx);
     if ( mine < (uint8_t)MODBUS_SLAVE_ADDRESS_MIN
          || mine > (uint8_t)MODBUS_SLAVE_ADDRESS_MAX ) {
@@ -87,10 +74,9 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
 
     req->address    = address;
     req->function   = me->rx_buffer[1];
-    req->pdu_length = (uint16_t)(frame_len - 3U); /* address + CRC */
+    req->pdu_length = (uint16_t)(frame_len - 3U);
 
     if ( address == (uint8_t)MODBUS_SLAVE_ADDRESS_BROADCAST ) {
-        /* Only the write function codes are valid broadcasts. */
         switch ( req->function ) {
             case MODBUS_SLAVE_FC_WRITE_SINGLE_COIL:
             case MODBUS_SLAVE_FC_WRITE_SINGLE_REGISTER:
@@ -106,8 +92,6 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
     return MODBUS_SLAVE_CAPTURE_UNICAST;
 }
 
-/* Decode ------------------------------------------------------------------ */
-
 modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
                                                  modbus_slave_request_t* req)
 {
@@ -120,14 +104,11 @@ modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
     }
     req->kind = shape->kind;
 
-    /* One validation order for every function code: length, then quantity,
-     * then the byte count of a multiple write. */
     if ( shape->pdu_length != 0U ) {
         if ( req->pdu_length != (uint16_t)shape->pdu_length ) {
             return MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE;
         }
     } else if ( req->pdu_length < 7U ) {
-        /* function + start + quantity + byte count + at least one byte. */
         return MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE;
     }
 
@@ -196,8 +177,6 @@ modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
     return MODBUS_SLAVE_EX_NONE;
 }
 
-/* Reply ------------------------------------------------------------------- */
-
 uint8_t* modbus_slave_adu_payload(modbus_slave_t* me,
                                   modbus_slave_response_t* rep,
                                   uint8_t function)
@@ -238,8 +217,6 @@ uint16_t modbus_slave_adu_finish(modbus_slave_t* me,
         me->tx_buffer[2] = rep->exception;
         length           = 2U;
     } else if ( rep->echo != 0U ) {
-        /* The write replies are the first five request PDU bytes: function,
-         * address and value/quantity. */
         for ( index = 1U; index < 6U; ++index ) {
             me->tx_buffer[index] = me->rx_buffer[index];
         }

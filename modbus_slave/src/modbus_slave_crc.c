@@ -2,11 +2,6 @@
 
 #include "modbus_slave_internal.h"
 
-/* CRC16/Modbus: polynomial 0x8005 reflected to 0xA001, initial value 0xFFFF,
- * no final XOR. On the wire the low byte comes first; the callers compare
- * and append accordingly. A 256-entry table (512 bytes of flash) trades that
- * for one table lookup and one XOR per input byte. */
-
 static const uint16_t crc_table[256] = {
     0x0000U, 0xC0C1U, 0xC181U, 0x0140U, 0xC301U, 0x03C0U, 0x0280U, 0xC241U,
     0xC601U, 0x06C0U, 0x0780U, 0xC741U, 0x0500U, 0xC5C1U, 0xC481U, 0x0440U,

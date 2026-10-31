@@ -1,19 +1,5 @@
 /* SPDX-License-Identifier: MIT */
 
-/*
- * Host test for the modbus_slave core.
- *
- * Drives the public seam -- advance(), the ISR entry points, start/stop -- with
- * a fake board and checks the bytes that would reach the wire. A second part
- * checks the frame codec's request shapes directly: decoding needs no port and
- * no interrupt, only the captured bytes.
- *
- * No framework and no instrumentation: build the core sources plus this file.
- *
- * The expected ADU is built here with an independent bit-wise CRC16, so a bug
- * in the table-driven implementation is not masked by the test.
- */
-
 #include <stdio.h>
 #include <string.h>
 
@@ -21,7 +7,7 @@
 
 #define SLAVE_ADDR 1U
 #define BAUDRATE   9600U
-#define T35_US     4011U /* ceil(38500000 / 9600) */
+#define T35_US     4011U
 
 static int checks;
 static int failures;
@@ -34,8 +20,6 @@ static int failures;
             printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);           \
         }                                                                    \
     } while ( 0 )
-
-/* Fake board -------------------------------------------------------------- */
 
 typedef struct {
     uint8_t  rx_open;
@@ -50,7 +34,6 @@ typedef struct {
     uint8_t  tx_done;
     int      serial_calls;
     int      timer_arms;
-    /* event port */
     int      ev_frame;
     int      ev_sent;
     int      ev_timeout;
@@ -110,8 +93,6 @@ static modbus_slave_status_t fake_cancel(void* ctx)
     return MODBUS_SLAVE_OK;
 }
 
-/* The nesting counter the port is required to keep: interrupts come back only
- * when the outermost section exits. */
 static void fake_enter(void* ctx)
 {
     fake_t* f = (fake_t*)ctx;
@@ -145,21 +126,17 @@ static void fake_on_tx_timeout(void* ctx)
     ((fake_t*)ctx)->ev_timeout++;
 }
 
-/* Data space -------------------------------------------------------------- */
-
 typedef struct {
     uint16_t holding[8];
     uint16_t input[8];
     uint8_t  coils[16];
     uint8_t  discrete[16];
-    uint8_t  address_offset; /* stands in for the DIP switch */
+    uint8_t  address_offset;
     int      calls;
 } store_t;
 
 static store_t store;
 
-/* The address register (holding[7]) is the base; the offset plays the part of
- * the DIP switch. Out-of-range combinations are the core's to reject. */
 static uint8_t test_address(void* ctx)
 {
     (void)ctx;
@@ -267,8 +244,6 @@ static modbus_slave_exception_t input_cb(void* ctx,
     return regs_impl(store.input, start, count, buffer, mode);
 }
 
-/* Harness ----------------------------------------------------------------- */
-
 static modbus_slave_t slave;
 static uint8_t        rx_buffer[256];
 static uint8_t        tx_buffer[256];
@@ -301,18 +276,16 @@ static int setup(void)
     modbus_slave_port_event_t events;
 
     if ( in_service != 0 ) {
-        /* The core must be stopped before it is constructed again. */
         (void)modbus_slave_stop(&slave);
         in_service = 0;
     }
 
     memset(&port, 0, sizeof port);
-    port.irq_enabled = 1U; /* interrupts start enabled */
+    port.irq_enabled = 1U;
     memset(&store, 0, sizeof store);
     memset(&slave, 0, sizeof slave);
     memset(&cfg, 0, sizeof cfg);
 
-    /* Holding register 7 is the address base; the offset is the DIP switch. */
     store.holding[7] = (uint16_t)SLAVE_ADDR;
 
     cfg.baudrate    = BAUDRATE;
@@ -359,7 +332,6 @@ static int setup(void)
     return 0;
 }
 
-/* One one-shot timer expiry: the T3.5 gap, or the TX watchdog. */
 static void gap(void)
 {
     (void)modbus_slave_timer_expired(&slave);
@@ -390,11 +362,11 @@ static void feed_frame(uint8_t address,
         frame[n - 1] = (uint8_t)(frame[n - 1] ^ 0x5AU);
     }
 
-    gap(); /* resynchronize if the core is waiting out a T3.5 */
+    gap();
     for ( i = 0; i < n; ++i ) {
         (void)modbus_slave_rx_byte(&slave, frame[i]);
     }
-    gap(); /* the inter-frame gap that completes the frame */
+    gap();
 }
 
 static void feed(uint8_t address,
@@ -404,13 +376,11 @@ static void feed(uint8_t address,
     feed_frame(address, body, body_len, 0);
 }
 
-/* Forget the bytes already transmitted, so the next reply starts at index 0. */
 static void clear_tx(void)
 {
     port.tx_len = 0;
 }
 
-/* Drive TXE until the whole ADU has been written, then close with TC. */
 static void finish_tx(void)
 {
     int i;
@@ -476,8 +446,6 @@ static void expect_exception(uint8_t function,
     expect_adu(pdu, 2);
 }
 
-/* Cases ------------------------------------------------------------------- */
-
 static void test_start(void)
 {
     setup();
@@ -487,9 +455,8 @@ static void test_start(void)
     CHECK(port.timer_us == T35_US);
     CHECK(modbus_slave_get_address(&slave) == SLAVE_ADDR);
 
-    gap(); /* start-up: the first T3.5 takes the RX machine to IDLE */
+    gap();
 
-    /* A frame event with nothing captured is stale and changes nothing. */
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_NONE);
     CHECK(port.serial_calls > 0);
 }
@@ -509,9 +476,8 @@ static void test_read_holding(void)
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     CHECK(port.tx_open == 1U);
     CHECK(port.rx_open == 0U);
-    CHECK(port.timer_us > 10000U); /* the watchdog, not the T3.5 */
+    CHECK(port.timer_us > 10000U);
 
-    /* A second frame event while the reply is on the wire changes nothing. */
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
 
     finish_tx();
@@ -551,7 +517,7 @@ static void test_write_single_coil(void)
     feed(SLAVE_ADDR, req, (int)sizeof req);
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     finish_tx();
-    expect_adu(req, (int)sizeof req); /* the response echoes the request */
+    expect_adu(req, (int)sizeof req);
     CHECK(store.coils[3] == 1U);
 }
 
@@ -653,8 +619,6 @@ static void test_write_multiple_coils_offset(void)
     finish_tx();
     expect_adu(pdu, (int)sizeof pdu);
 
-    /* Data bit i belongs to coil start + i, even when start is not on a
-     * byte boundary. */
     CHECK(store.coils[2] == 0U);
     CHECK(store.coils[3] == 1U);
     CHECK(store.coils[10] == 1U);
@@ -672,7 +636,7 @@ static void test_broadcast_write(void)
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_HANDLED);
     CHECK(port.tx_len == 0);
     CHECK(port.tx_open == 0U);
-    CHECK(port.rx_open == 1U); /* the core re-opened reception itself */
+    CHECK(port.rx_open == 1U);
     CHECK(port.ev_sent == 0);
     CHECK(store.holding[1] == 0xABCDU);
 }
@@ -745,14 +709,13 @@ static void test_tx_timeout(void)
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     CHECK(port.timer_us > 10000U);
 
-    gap(); /* the watchdog expires in the timer interrupt */
+    gap();
     CHECK(port.ev_timeout == 1);
-    CHECK(port.rx_open == 1U);   /* DE released, reception back on */
+    CHECK(port.rx_open == 1U);
     CHECK(port.tx_open == 0U);
     CHECK(port.timer_armed == 1U);
-    CHECK(port.timer_us == T35_US); /* resynchronizing */
+    CHECK(port.timer_us == T35_US);
 
-    /* The transaction is over, and reception is waiting out the gap. */
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_NONE);
 
     gap();
@@ -769,8 +732,6 @@ static void test_address_callback(void)
     setup();
     CHECK(modbus_slave_get_address(&slave) == SLAVE_ADDR);
 
-    /* A write to the address register is answered by the address the master
-     * used; the new address applies from the next frame on. */
     feed(SLAVE_ADDR, wr, (int)sizeof wr);
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     finish_tx();
@@ -778,13 +739,11 @@ static void test_address_callback(void)
     CHECK(modbus_slave_get_address(&slave) == 2U);
     clear_tx();
 
-    /* The old address is no longer ours: dropped, no callback, no reply. */
     feed(SLAVE_ADDR, rd, (int)sizeof rd);
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_HANDLED);
     CHECK(port.tx_len == 0);
     CHECK(store.calls == 1);
 
-    /* The new address answers. */
     feed(2U, rd, (int)sizeof rd);
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     finish_tx();
@@ -792,7 +751,6 @@ static void test_address_callback(void)
     CHECK(store.calls == 2);
     clear_tx();
 
-    /* The DIP offset is added on top, with no apply step. */
     store.address_offset = 1U;
     CHECK(modbus_slave_get_address(&slave) == 3U);
     feed(3U, rd, (int)sizeof rd);
@@ -801,8 +759,6 @@ static void test_address_callback(void)
     expect_adu_at(3U, rd_pdu, (int)sizeof rd_pdu);
     clear_tx();
 
-    /* An out-of-range address silences the slave, even for the broadcast
-     * address. */
     store.holding[7]     = 0U;
     store.address_offset = 0U;
     feed(0U, wr, (int)sizeof wr);
@@ -819,16 +775,12 @@ static void test_start_mid_tx(void)
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
 
     CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_ERR_STATE);
-    CHECK(port.rx_open == 0U); /* reception was not switched on under TX */
+    CHECK(port.rx_open == 0U);
 
     finish_tx();
     CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_OK);
 }
 
-/* Frame codec: request shapes --------------------------------------------- */
-
-/* Capture one ADU into the receive buffer and run the decoder on it. No port
- * is involved: the codec only reads bytes and fills the request view. */
 static void check_shape(const uint8_t* pdu,
                         uint16_t pdu_len,
                         uint8_t kind,
@@ -929,8 +881,6 @@ static void test_nested_critical(void)
     CHECK(port.crit_depth == 0U);
     CHECK(port.irq_enabled == 1U);
 
-    /* The application holds its own section across a core call: the core's
-     * exit must not re-enable interrupts. */
     fake_enter(&port);
     CHECK(port.irq_enabled == 0U);
     CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_OK);
@@ -940,7 +890,6 @@ static void test_nested_critical(void)
     CHECK(port.crit_depth == 0U);
     CHECK(port.irq_enabled == 1U);
 
-    /* stop() balances its own pair. */
     CHECK(modbus_slave_stop(&slave) == MODBUS_SLAVE_OK);
     CHECK(port.crit_depth == 0U);
     CHECK(port.irq_enabled == 1U);

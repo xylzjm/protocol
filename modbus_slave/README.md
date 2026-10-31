@@ -32,8 +32,6 @@ modbus_slave/                      this stack's root
 ├── README.md                      this file
 ├── GLOSSARY.md                    domain terms (transaction, reception window, ...)
 ├── LICENSE-MIT                    license
-├── docs/adr/                      architecture decisions (the core owns the
-│                                  transaction; the address is a callback)
 ├── test/                          host test with a fake board
 │   └── test_modbus_slave.c
 ├── inc/                           core headers
@@ -63,21 +61,19 @@ board binding                       pure C: USART, DE, T3.5 timer, buffers
 hardware
 ```
 
-Five seams, each a constructor or runtime dependency:
+The core has five interfaces, each a constructor or runtime dependency:
 
-- `modbus_slave_port_line_t` — the **RS485 line**: direction, one byte out, end of
-  the stream. A constructor dependency in `modbus_slave_config_t`.
-- `modbus_slave_port_timer_t` — the **one-shot timer** behind T3.5 and the TX
-  watchdog. Constructor dependency.
-- `modbus_slave_port_critical_t` — the **nesting interrupt mask**. Constructor
-  dependency. The three hardware structs carry their own `ctx`, so a board's
-  UART and timer stay separate objects.
+- three hardware capabilities in `modbus_slave_config_t` — the RS485 line,
+  the one-shot timer and the nesting interrupt mask, each with its own `ctx`;
 - `modbus_slave_port_event_t` — the **event port**, a runtime dependency
   attached with `modbus_slave_set_event_port()` **before**
   `modbus_slave_start()` (after start it returns `MODBUS_SLAVE_ERR_STATE`).
-  `NULL` detaches the port: the core keeps working but drops events.
+  `NULL` detaches the port: the core keeps working but drops events;
 - `modbus_slave_callbacks_t` — the **data space and the address**: five
   callbacks asked synchronously inside `advance()`, in the caller's context.
+
+The types themselves state each operation's contract; the sections below add
+what a board or an application has to get right when wiring them.
 
 ## Hardware capabilities
 
@@ -130,21 +126,15 @@ Notes the board implementation must respect:
 ## Callback contract
 
 Five callbacks — coils, discrete inputs, holding registers, input registers and
-the slave address — plus a shared `ctx`:
+the slave address — plus a shared `ctx`. The limits and rules the types do not
+carry:
 
-- `address()` returns the current slave address (1..247) and is asked before
-  every received frame. A product that combines a register base with a DIP
-  offset computes it here. A value outside 1..247 makes the core ignore every
-  frame, so a miscomputed address leaves the slave silent instead of answering
-  as if it were the broadcast address.
-- Addresses are 0-based wire addresses; no `+1` adjustment anywhere.
-- Registers are big-endian, 2 bytes each (`modbus_slave_get_u16()` /
-  `modbus_slave_put_u16()` helpers). Reads: up to 125 registers; writes: up
-  to 123.
-- Coils/discrete inputs are packed LSB-first, unused high bits of the last
-  byte cleared. Reads: up to 2000 bits; writes: up to 1968.
-- Read mode: the callback fills `buffer`. Write mode: the callback reads
-  `buffer` and must not modify it.
+- `address()`: a product that combines a register base with a DIP offset
+  computes it here. A value outside 1..247 makes the core ignore every frame,
+  so a miscomputed address leaves the slave silent instead of answering as if
+  it were the broadcast address.
+- Reads are limited to 125 registers / 2000 bits; writes to 123 registers /
+  1968 bits.
 - Out-of-range addresses are the callback's job
   (`MODBUS_SLAVE_EX_ILLEGAL_DATA_ADDRESS`); quantities and byte counts are
   the stack's job (`ILLEGAL_DATA_VALUE`).
@@ -170,7 +160,9 @@ the slave address — plus a shared `ctx`:
 - TX watchdog: `tx_len × 11 × 10⁶ / baud + 10000` µs. On expiry the core
   aborts the transmission in the timer interrupt — TXE/TC disabled, DE
   released, reception resynchronized on a fresh T3.5 — and then reports
-  `on_tx_timeout`, which is informational: the line is already free.
+  `on_tx_timeout`, which is informational: the line is already free. Recovery
+  does not depend on event delivery: a dropped `on_tx_timeout` costs a
+  diagnostic count, not the bus.
 
 ## Core session
 
@@ -252,6 +244,10 @@ Rules that live on the application side:
 - **One context.** `advance()` is not re-entrant: call it from the AO only.
 - **Queue.** Two signals per transaction; the AO's event queue must not
   overflow (with QP, at least 4 events).
+- **Scheduling is yours.** Until `advance()` runs the frame stays in
+  `CAPTURED` and reception stays off; the core has no timeout there and never
+  runs the transaction behind your back. A late call answers that frame
+  normally; an AO that never runs leaves the slave silent.
 - **Lifecycle.** Call `start()` when the channel enters service and `stop()`
   when it leaves. Both are idempotent; `start()` refuses while a reply is on
   the wire.

@@ -115,7 +115,6 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
 
     me->request_address = config->address;
     me->function        = 0U;
-    me->broadcast       = 0U;
     me->started         = 0U;
 
     return MODBUS_SLAVE_OK;
@@ -154,6 +153,11 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
+    }
+    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+        /* A response is on the wire; start() must not switch reception on
+         * under it. Tear the transmission down with stop() first. */
+        return MODBUS_SLAVE_ERR_STATE;
     }
 
     token = me->port.critical_enter(me->port.ctx);
@@ -283,29 +287,26 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me)
     return MODBUS_SLAVE_OK;
 }
 
-/* Backend primitives ------------------------------------------------------ */
+/* The backend's one operation per frame ------------------------------------ */
 
 static void reopen_rx(modbus_slave_t* me)
 {
     (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
 }
 
-modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me)
+/* Validate the captured ADU and apply the broadcast policy. Called only with
+ * reception frozen (WAIT_PROCESS) and no transmission in progress; leaves the
+ * RX machine IDLE and the transaction owning the window. */
+static enum modbus_slave_rx_status capture_request(modbus_slave_t* me)
 {
     uint8_t address;
     uint16_t frame_len;
     uint16_t crc;
 
-    if ( me == NULL
-         || me->rx_state != (uint8_t)MODBUS_SLAVE_RX_STATE_WAIT_PROCESS ) {
-        /* No frozen window is held here (stray event), so none is released. */
-        return MODBUS_SLAVE_RX_IGNORE;
-    }
-
     /* WAIT_PROCESS -> IDLE: whatever the verdict, the frame machine is free
      * again; this transaction owns the frozen reception window now. Every
      * exit below that ends the transaction re-opens it; the UNICAST exit
-     * hands the window over to the TX path (tx_complete/abort_tx). */
+     * hands the window over to the TX path. */
     me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
 
     frame_len = me->rx_pos;
@@ -333,14 +334,13 @@ modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me)
     me->pdu_len         = (uint16_t)(frame_len - 3U); /* address + CRC */
 
     if ( address == (uint8_t)MODBUS_SLAVE_ADDRESS_BROADCAST ) {
-        me->broadcast = 1U;
         switch ( me->function ) {
             case MODBUS_SLAVE_FC_WRITE_SINGLE_COIL:
             case MODBUS_SLAVE_FC_WRITE_SINGLE_REGISTER:
             case MODBUS_SLAVE_FC_WRITE_MULTIPLE_COILS:
             case MODBUS_SLAVE_FC_WRITE_MULTIPLE_REGS:
-                /* execute() re-opens reception when it is done with the
-                 * buffer; a broadcast is never answered. */
+                /* advance() executes it and re-opens reception when it is
+                 * done with the buffer; a broadcast is never answered. */
                 return MODBUS_SLAVE_RX_BROADCAST;
 
             default:
@@ -350,59 +350,53 @@ modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me)
         }
     }
 
-    me->broadcast = 0U;
     return MODBUS_SLAVE_RX_UNICAST;
 }
 
-void modbus_slave_execute(modbus_slave_t* me)
+modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
 {
-    if ( me == NULL ) {
-        return;
+    enum modbus_slave_rx_status status;
+
+    if ( me == NULL || me->started == 0U ) {
+        return MODBUS_SLAVE_STEP_NONE;
     }
+    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+        /* A response is on the wire: the TX path owns the reception window
+         * and releases it at TC or on the watchdog. A frame event arriving
+         * now is stale; leave everything as it is. */
+        return MODBUS_SLAVE_STEP_SENDING;
+    }
+    if ( me->rx_state != (uint8_t)MODBUS_SLAVE_RX_STATE_WAIT_PROCESS ) {
+        /* No frozen window is held by anyone (stray event). */
+        return MODBUS_SLAVE_STEP_NONE;
+    }
+
+    status = capture_request(me);
+    if ( status == MODBUS_SLAVE_RX_IGNORE ) {
+        return MODBUS_SLAVE_STEP_HANDLED; /* capture_request re-opened RX */
+    }
+
     modbus_slave_pdu_execute(me);
 
-    if ( me->broadcast != 0U ) {
-        /* A broadcast is never answered, so this transaction ends here:
-         * release the reception window receive() froze. A unicast keeps the
-         * window frozen so the request buffer cannot change under send(). */
+    if ( status == MODBUS_SLAVE_RX_BROADCAST ) {
+        /* A broadcast is never answered, so the transaction ends here and
+         * this is the only place that releases its window. */
         reopen_rx(me);
+        return MODBUS_SLAVE_STEP_HANDLED;
     }
-}
 
-modbus_slave_status_t modbus_slave_send(modbus_slave_t* me)
-{
-    if ( me == NULL ) {
-        return MODBUS_SLAVE_ERR_ARG;
-    }
-    if ( me->started == 0U
-         || me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
-        /* Stopped, or a transmission is on the wire: that path owns the
-         * reception window and releases it at completion/abort. */
-        return MODBUS_SLAVE_ERR_STATE;
-    }
-    /* A broadcast is never answered: execute() may have built a PDU for the
-     * callbacks, but it must not reach the wire (execute() has already
-     * re-opened reception for it). */
-    if ( me->broadcast != 0U ) {
-        return MODBUS_SLAVE_ERR_STATE;
-    }
     if ( me->response_len == 0U ) {
-        /* Nothing to send: the transaction ends here, so this path must
-         * release the reception window receive() froze. */
+        /* Nothing to send (defensive: a unicast always builds a reply, if
+         * only an exception). The transaction ends here as well. */
         reopen_rx(me);
-        return MODBUS_SLAVE_ERR_STATE;
+        return MODBUS_SLAVE_STEP_HANDLED;
     }
 
+    /* Wrap the reply in an ADU, arm the watchdog and start transmitting.
+     * Reception stays frozen -- the request buffer must not change under the
+     * transmitter -- and the TX path releases it at TC or on the watchdog. */
     modbus_slave_rtu_send(me);
-    return MODBUS_SLAVE_OK;
-}
-
-void modbus_slave_abort_tx(modbus_slave_t* me)
-{
-    if ( me == NULL ) {
-        return;
-    }
-    modbus_slave_rtu_abort_tx(me);
+    return MODBUS_SLAVE_STEP_SENDING;
 }
 
 /* Configuration ----------------------------------------------------------- */
@@ -418,16 +412,32 @@ void modbus_slave_set_address_pending(modbus_slave_t* me,
     me->address_pending = 1U;
 }
 
-void modbus_slave_apply_config(modbus_slave_t* me)
+modbus_slave_status_t modbus_slave_apply_config(modbus_slave_t* me)
 {
-    if ( me == NULL || me->address_pending == 0U ) {
-        return;
+    uint32_t token;
+
+    if ( me == NULL ) {
+        return MODBUS_SLAVE_ERR_ARG;
+    }
+    if ( me->address_pending == 0U ) {
+        return MODBUS_SLAVE_OK;
+    }
+
+    token = me->port.critical_enter(me->port.ctx);
+
+    if ( me->started != 0U
+         && me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+        /* A response owns the window: swapping the address now would corrupt
+         * it. Keep the pending address for a later call. */
+        me->port.critical_exit(me->port.ctx, token);
+        return MODBUS_SLAVE_ERR_STATE;
     }
 
     if ( me->started != 0U ) {
-        /* A running core needs its own critical window: mute reception and
-         * drop the partial frame a mid-flight byte stream was building, so
-         * the next request cannot merge with stale bytes. */
+        /* Mute reception and disarm the frame timer, so the next request
+         * cannot merge with bytes of the frame this swap interrupts. */
+        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
+        (void)me->port.timer_disable(me->port.ctx);
         (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
         me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
         me->rx_pos   = 0U;
@@ -437,8 +447,15 @@ void modbus_slave_apply_config(modbus_slave_t* me)
     me->address_pending = 0U;
 
     if ( me->started != 0U ) {
+        /* Re-open reception and wait out one T3.5 of bus idle, exactly like
+         * start(), so the first request after the swap is framed cleanly. */
+        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
         (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
     }
+
+    me->port.critical_exit(me->port.ctx, token);
+    return MODBUS_SLAVE_OK;
 }
 
 uint8_t modbus_slave_get_address(const modbus_slave_t* me)

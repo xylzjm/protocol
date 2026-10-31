@@ -3,9 +3,9 @@
 #include "modbus_slave_internal.h"
 
 /* PDU execution: the nine supported function codes plus the exception path.
- * execute() builds the response PDU into tx_buffer[1..]; send() later wraps
- * it with the slave address and the CRC. A broadcast request builds its
- * response too — the backend simply never sends it. */
+ * execute() builds the response PDU into tx_buffer[1..]; rtu_send() later
+ * wraps it with the slave address and the CRC. A broadcast request builds its
+ * response too — the core simply never sends it. */
 
 static void make_exception(modbus_slave_t* me,
                            modbus_slave_exception_t exception)

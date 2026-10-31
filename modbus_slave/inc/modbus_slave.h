@@ -18,8 +18,9 @@
  *   sections), passed to modbus_slave_ctor().
  * - A backend (QP, bare metal loop, RTOS task, ...) drives the core:
  *   it receives frame events through modbus_slave_event_port_t and then
- *   calls modbus_slave_receive()/modbus_slave_execute()/modbus_slave_send()
- *   in its own context.
+ *   calls modbus_slave_advance() once per frame, in its own context.
+ *   The transaction and the reception window belong to the core; a backend
+ *   never switches the serial direction.
  *
  * The core includes only <stdint.h> and <stddef.h>; it never includes QP,
  * an RTOS, or a vendor header. Multiple instances may coexist: there is no
@@ -57,12 +58,12 @@ typedef enum {
     MODBUS_SLAVE_EX_GATEWAY_TGT_FAILED   = 0x0B
 } modbus_slave_exception_t;
 
-/** @brief Outcome of modbus_slave_receive() for one received ADU. */
+/** @brief Outcome of modbus_slave_advance() for one received frame. */
 typedef enum {
-    MODBUS_SLAVE_RX_IGNORE = 0, /**< CRC/address/length error, broadcast read, broadcast 0x11. */
-    MODBUS_SLAVE_RX_UNICAST,    /**< Valid request that expects a response. */
-    MODBUS_SLAVE_RX_BROADCAST   /**< Valid broadcast write; execute, never respond. */
-} modbus_slave_rx_status_t;
+    MODBUS_SLAVE_STEP_NONE = 0, /**< Nothing was waiting (stale or spurious event). */
+    MODBUS_SLAVE_STEP_HANDLED,  /**< The frame is consumed; reception is open again. */
+    MODBUS_SLAVE_STEP_SENDING   /**< A response is on the wire; the TX path holds reception. */
+} modbus_slave_step_t;
 
 /* Hardware capability interface (board-provided) -------------------------- */
 
@@ -87,7 +88,9 @@ typedef enum {
  * - timer_enable(timeout_us): arms the one-shot inter-frame/TX timer; when it
  *   expires the board must call modbus_slave_timer_expired(). At low baud
  *   rates the timeout can reach several seconds, so the timer has to support
- *   long durations.
+ *   long durations. The core also re-arms it from inside the expiry interrupt
+ *   (it resynchronizes reception after an aborted transmission), so the board
+ *   must clear the pending match before the timer is enabled again.
  * - timer_disable(): stops the timer and clears a pending expiry.
  * - critical_enter()/critical_exit(state): save and disable interrupts,
  *   restore the saved state. The token must nest correctly (PRIMASK/BASEPRI
@@ -253,7 +256,6 @@ typedef struct modbus_slave {
 
     uint8_t request_address; /**< Address of the current request. */
     uint8_t function;        /**< Current function code. */
-    uint8_t broadcast;       /**< Current request is a broadcast. */
     uint8_t started;         /**< modbus_slave_start() has run. */
 } modbus_slave_t;
 
@@ -300,6 +302,9 @@ modbus_slave_status_t modbus_slave_set_event_port(
  * Returns MODBUS_SLAVE_ERR_IO when the port failed to switch the serial
  * direction or to arm the inter-frame timer. The instance then stays
  * stopped (a first start is rolled back); call stop() and retry.
+ *
+ * Returns MODBUS_SLAVE_ERR_STATE when a response is on the wire: use stop()
+ * to tear that transmission down first.
  */
 modbus_slave_status_t modbus_slave_start(modbus_slave_t* me);
 
@@ -330,59 +335,32 @@ modbus_slave_status_t modbus_slave_tx_ready(modbus_slave_t* me);
 /** Report UART TC (transmission complete). Closes TX, reopens RX, notifies the backend. */
 modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me);
 
-/* Primitives for the backend --------------------------------------- */
+/* The backend's one operation per frame ---------------------------- */
 
 /**
- * @brief Validate the received ADU and capture the request.
+ * @brief Take the captured frame to its conclusion.
  *
- * Checks CRC, length and address, and applies the broadcast policy: only
- * write functions (0x05, 0x06, 0x0F, 0x10) are valid broadcasts. Returns
- * MODBUS_SLAVE_RX_IGNORE for anything that must be dropped silently,
- * MODBUS_SLAVE_RX_BROADCAST for an accepted broadcast write (execute it but
- * never respond), and MODBUS_SLAVE_RX_UNICAST for a valid addressed request.
- * Leaves the RX machine in its idle state either way.
+ * One call runs one transaction: validate the ADU (CRC, length, address and
+ * the broadcast policy), execute the function code, build the response and,
+ * for a unicast that owes one, start transmitting it. Call it when
+ * on_frame_received fires; a frame event that reaches the backend when no
+ * frame is waiting is stale and is answered with MODBUS_SLAVE_STEP_NONE.
  *
- * Reception window ownership: the T3.5 expiry froze reception before this
- * call. An IGNORE result (or a stray event, which froze nothing) releases
- * the window here; BROADCAST hands it to modbus_slave_execute(), UNICAST to
- * modbus_slave_send() and the TX completion path. Every transaction outcome
- * releases the window, so a rejected request can never leave the slave deaf.
+ * The reception window belongs to this function. The T3.5 interrupt froze
+ * reception before the call; every outcome here either re-opens it or hands
+ * it to the TX path, which releases it at TC or when the watchdog aborts the
+ * transmission. No caller can leave the slave deaf.
+ *
+ * - MODBUS_SLAVE_STEP_NONE: nothing was waiting (stale event, or the core is
+ *   stopped). Nothing changed.
+ * - MODBUS_SLAVE_STEP_HANDLED: the frame was ignored, executed as a
+ *   broadcast, or produced no reply. Reception is open again.
+ * - MODBUS_SLAVE_STEP_SENDING: a response is on the wire. The TX path owns
+ *   reception until on_frame_sent or on_tx_timeout. A frame event dispatched
+ *   in the meantime returns MODBUS_SLAVE_STEP_SENDING again and changes
+ *   nothing.
  */
-modbus_slave_rx_status_t modbus_slave_receive(modbus_slave_t* me);
-
-/**
- * @brief Execute the captured request and build the response PDU.
- *
- * Runs the data callbacks for the matching function code and writes the
- * response PDU (or exception response) to the transmit buffer. For a
- * broadcast the response is built but must be discarded: modbus_slave_send()
- * refuses it, and this function releases the reception window, ending the
- * broadcast transaction. A unicast keeps the window frozen so the request
- * buffer cannot change under send().
- */
-void modbus_slave_execute(modbus_slave_t* me);
-
-/**
- * @brief Wrap the response PDU in an ADU and start transmitting it.
- *
- * Prepends the slave address, appends the CRC and switches the serial port
- * to transmit. Transmission is driven by the TXE/TC interrupts. The built
- * response is consumed by the call, so a second send() without a fresh
- * execute() is rejected.
- *
- * Returns MODBUS_SLAVE_ERR_STATE when a transmission is already in progress,
- * no response has been built, or the pending request was a broadcast (a
- * broadcast is never answered, even if execute() built a PDU for it).
- *
- * Reception window: when the refusal ends the transaction (no response has
- * been built), the window is released here. The other refusals leave it to
- * the path that owns it -- the transmission in progress releases it at
- * completion/abort, a stopped core needs no window at all.
- */
-modbus_slave_status_t modbus_slave_send(modbus_slave_t* me);
-
-/** Abandon an ongoing transmission and release the bus. Reception re-opens. */
-void modbus_slave_abort_tx(modbus_slave_t* me);
+modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me);
 
 /**
  * @brief Store a new slave address; it takes effect at the next apply.
@@ -394,15 +372,23 @@ void modbus_slave_set_address_pending(modbus_slave_t* me,
                                       uint8_t address);
 
 /**
- * Apply the pending address, if any. Backends call this in their idle entry.
+ * @brief Apply the pending address, if any.
+ *
+ * Backends call this from their idle entry, after
+ * modbus_slave_set_address_pending(). Returns MODBUS_SLAVE_OK when the
+ * address was applied or nothing was pending.
  *
  * On a started core the swap runs in its own reception window: reception is
- * muted, a partially received frame is dropped (the RX machine restarts at
- * INIT, so the next request begins after a full T3.5 gap) and reception is
- * re-opened. A mid-frame reconfiguration can therefore never merge stale
- * bytes into the next request. Before start() only the address changes.
+ * muted, the T3.5 timer is disarmed, a partially received frame is dropped,
+ * and reception is re-opened after a full T3.5 of bus idle. A mid-frame
+ * reconfiguration can therefore never merge stale bytes into the next
+ * request. Before start() only the address changes.
+ *
+ * Returns MODBUS_SLAVE_ERR_STATE while a response is on the wire: swapping
+ * the address would corrupt the transmission that owns the window. The
+ * pending address is kept, so a later call applies it.
  */
-void modbus_slave_apply_config(modbus_slave_t* me);
+modbus_slave_status_t modbus_slave_apply_config(modbus_slave_t* me);
 
 /** Current effective slave address. */
 uint8_t modbus_slave_get_address(const modbus_slave_t* me);

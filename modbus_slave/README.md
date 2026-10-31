@@ -8,8 +8,8 @@ A Modbus RTU slave stack in portable C99 with a pluggable backend.
   RTOS, no vendor headers — so it compiles anywhere and can be reused under
   a different backend.
 - **Replaceable backend** under `backend/`: a backend receives frame
-  events from the core and drives the receive/execute/send primitives in its
-  own context (QP state machine, bare-metal superloop, RTOS task). The QP
+  events from the core and calls `modbus_slave_advance()` once per frame, in
+  its own context (QP state machine, bare-metal superloop, RTOS task). The QP
   backend ships in this repository; `backend/bare/` and `backend/freertos/` are
   extension points.
 - **Board-owned hardware**: the board module implements the hardware port
@@ -28,13 +28,16 @@ inter-frame gap is implemented (no strict T1.5).
 ```
 modbus_slave/                      this stack's root
 ├── README.md                      this file
+├── GLOSSARY.md                    domain terms (transaction, reception window, ...)
 ├── LICENSE-MIT                    license of the pure C core
 ├── LICENSE-GPL-3.0                license of backend/qp/
+├── docs/adr/                      architecture decisions (ADR-0001: the core
+│                                  owns the transaction and its reception window)
 ├── inc/                           core headers
 │   ├── modbus_slave.h             public core API
 │   └── modbus_slave_internal.h    internal constants/state enums (core only)
 ├── src/                           pure C core sources
-│   ├── modbus_slave.c             ctor/start/stop, receive/execute/send, ISRs, event port
+│   ├── modbus_slave.c             ctor/start/stop, advance(), ISRs, event port
 │   ├── modbus_slave_rtu.c         RX/TX frame machines, T3.5, TX watchdog, ADU
 │   ├── modbus_slave_pdu.c         the 9 function codes
 │   └── modbus_slave_crc.c         CRC16/Modbus (256-entry table)
@@ -82,7 +85,7 @@ Two capability interfaces cross the boundaries:
 | `serial_enable(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE, disable the TXE/TC interrupts and clear a pending TC. `tx=1`: assert DE, clear TC, enable TXE+TC. `(0,0)`: disable both, release DE. |
 | `put_byte(byte)` | TXE ISR | Write the UART data register, non-blocking. |
 | `tx_done()` | TXE ISR | The core has loaded the last byte (or has nothing left to send). Stop requesting TXE; keep TCIE enabled so the TC path closes the frame and releases DE. |
-| `timer_enable(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). |
+| `timer_enable(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). Must also be callable from the timer's own expiry ISR — the core re-arms it there to resynchronize reception after an aborted transmission — so clear the pending match before enabling. |
 | `timer_disable()` | task / ISR | Stop and clear. |
 | `critical_enter()` / `critical_exit(state)` | ISR / task | Save+disable interrupts / restore. PRIMASK or BASEPRI on QV/QK; `portSET/CLEAR_INTERRUPT_MASK_FROM_ISR` under FreeRTOS+QP. Not `QF_CRIT_ENTRY/EXIT` (default non-saving, non-nesting). |
 
@@ -126,9 +129,9 @@ plus a shared `ctx`:
 
 - Broadcast (address 0): `05`/`06`/`0F`/`10` execute without a response;
   `01`/`02`/`03`/`04`/`11` are ignored without invoking callbacks.
-- A broadcast is never answered: `modbus_slave_send()` refuses a broadcast
-  response even when `execute()` has built one, so every backend gets that
-  guarantee from the core itself.
+- A broadcast is never answered: `advance()` executes the write and drops
+  the reply it built, so every backend gets that guarantee from the core
+  itself.
 - Report Slave ID (0x11) answers with `slave_id`, the run indicator
   (`0xFF`/`0x00`) and up to 249 additional bytes; the constructor rejects
   `identity.additional_length > 249`. The additional bytes are caller-owned
@@ -138,8 +141,10 @@ plus a shared `ctx`:
 - Exception response: `[addr][func|0x80][exception][crc]`, unicast only.
 - T3.5 = 3.5 character times: `(38500000 + baud − 1) / baud` µs up to
   19200 baud, fixed 1750 µs above.
-- TX watchdog: `tx_len × 11 × 10⁶ / baud + 10000` µs; on expiry the core
-  stops transmitting and reports `on_tx_timeout`.
+- TX watchdog: `tx_len × 11 × 10⁶ / baud + 10000` µs. On expiry the core
+  aborts the transmission in the timer interrupt — TXE/TC disabled, DE
+  released, reception resynchronized on a fresh T3.5 — and then reports
+  `on_tx_timeout`, which is informational: the line is already free.
 
 ## Core RX frame machine
 
@@ -148,17 +153,19 @@ INIT ──T3.5──► IDLE ──first byte──► RCV ──each byte─�
                   ▲                  │
                   │        T3.5 ─────┴──► WAIT_PROCESS (RX off, on_frame_received)
                   │      >256 bytes ──► ERROR ──T3.5──► IDLE (RX on)
-                  └──── receive() ◄── WAIT_PROCESS
+                  └──── advance() ◄── WAIT_PROCESS
 ```
 
 RX is switched off in `WAIT_PROCESS` so the next request cannot overwrite a
 frame the backend is still processing. The **reception window belongs to the
-core**: `receive()` releases it on an `IGNORE` result, hands it to
-`execute()` for a `BROADCAST` and to the TX path (`send()` →
-`tx_complete()`/`abort_tx()`) for a `UNICAST`, and `apply_config()` opens
-its own window around a reconfiguration. Every transaction outcome releases
-the window and the backend never touches reception switching — so a rejected
-request or a stuck transmitter can never leave the slave deaf.
+core**, and `modbus_slave_advance()` is the only operation that closes a
+transaction: it re-opens reception for an ignored frame, a broadcast or a
+unicast without a reply, and hands the window to the TX path — which releases
+it at TC, or when the watchdog aborts the transmission — for a unicast that is
+answered. `apply_config()` opens its own window around a reconfiguration.
+Every transaction outcome releases the window and the backend never touches
+reception switching — so a rejected request or a stuck transmitter can never
+leave the slave deaf.
 
 ## Backends
 
@@ -176,7 +183,7 @@ each channel's AO embeds it and forwards the protocol signals with
 `QASM_DISPATCH(&me->backend.super, e, 0u)`.
 
 ```
-STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
+STOPPED ──START──► IDLE ──FRAME_RCVED (reply started)──► SENDING
    ▲                ▲  └─────────── FRAME_SENT / TX_TIMEOUT ───┘
    └──── STOP ──────┴───────────────────────────────────────────
 ```
@@ -185,12 +192,12 @@ STOPPED ──START──► IDLE ──FRAME_RCVED (unicast)──► SENDING
 |---|---|---|---|
 | STOPPED | START | `start()` + apply pending config (via idle entry) | IDLE |
 | STOPPED | CONFIG | discarded; the pending address stays in the core | STOPPED |
-| IDLE | FRAME_RCVED | `receive()`; IGNORE ⇒ window already released; BROADCAST ⇒ `execute()` (releases it); UNICAST ⇒ `execute()` + `send()` (TX path owns it) | IDLE / SENDING |
-| IDLE | CONFIG | `apply_config()` (opens its own RX window) | IDLE |
+| IDLE | FRAME_RCVED | `advance()`; `NONE` ⇒ nothing changed; `HANDLED` ⇒ reception is open again; `SENDING` ⇒ the TX path owns the window | IDLE / SENDING |
+| IDLE | CONFIG | `apply_config()`: applies the pending address, then resynchronizes reception | IDLE |
 | IDLE | STOP | `stop()` | STOPPED |
 | IDLE | FRAME_SENT / TX_TIMEOUT | ignore (stale) | IDLE |
 | SENDING | FRAME_SENT | — | IDLE |
-| SENDING | TX_TIMEOUT | `abort_tx()`, increment `last_error` (readable with `modbus_slave_qp_tx_timeout_count()`) | IDLE |
+| SENDING | TX_TIMEOUT | increment `last_error` (readable with `modbus_slave_qp_tx_timeout_count()`); the core already aborted the transmission in the timer interrupt | IDLE |
 | SENDING | STOP | `stop()` | STOPPED |
 | SENDING | CONFIG | discarded; applied at the next idle entry | SENDING |
 | SENDING | FRAME_RCVED | ignore | SENDING |
@@ -301,8 +308,10 @@ static QState ModbusApp_ready(ModbusApp* me, QEvt const* e)
 To change the slave address at runtime: call
 `modbus_slave_set_address_pending()` (with an address in 1..247), then post
 `MB_CONFIG_SIG`. In `IDLE` the backend applies it immediately (the core
-opens its own reception window around the swap); in `STOPPED`/`SENDING` the
-event is discarded and the pending address — which lives in the core — is
+opens its own reception window around the swap and waits out one T3.5, so the
+next request is framed cleanly); in `STOPPED`/`SENDING` the event is
+discarded — the core refuses the swap with `MODBUS_SLAVE_ERR_STATE` while a
+reply is on the wire — and the pending address, which lives in the core, is
 applied at the next idle entry.
 
 ## Multi-instance

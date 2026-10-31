@@ -48,7 +48,7 @@
  * The backend is a QHsm component, not an active object: the application AO
  * of each channel owns it and dispatches protocol events into it with
  * QASM_DISPATCH(). The backend drives the pure-C core (modbus_slave_t)
- * through the receive/execute/send primitives.
+ * through modbus_slave_advance(), one call per received frame.
  *
  * Because this component includes qpc.h (QP is GPL-3.0-or-later or
  * commercial), it is licensed GPL-3.0-or-later, unlike the MIT core.
@@ -236,20 +236,22 @@ QState modbus_slave_qp_stopped(modbus_slave_qp* const me,
  * @brief In service.
  *
  * The entry applies the pending configuration and starts the core
- * (idempotent, ensures RX on). Handles the frame transaction
- * (receive -> execute -> send), runtime reconfiguration (MB_CONFIG) and
- * stop; stale completion events from an already finished transmission
- * are discarded.
+ * (idempotent, ensures RX on). A frame event runs the whole transaction
+ * with modbus_slave_advance(); the state leaves for sending only when that
+ * call reports a response on the wire. Runtime reconfiguration (MB_CONFIG)
+ * and stop are handled here; stale completion events from an already
+ * finished transmission are discarded.
  */
 QState modbus_slave_qp_idle(modbus_slave_qp* const me,
                             QEvt const* const e);
 /**
  * @brief Response on the wire.
  *
- * MB_FRAME_SENT returns to idle; MB_TX_TIMEOUT aborts the transmission
- * (abort_tx), counts the incident in last_error and returns to idle;
- * MB_STOP stops everything via the stopped entry; MB_CONFIG is discarded
- * and applied at the next idle entry.
+ * MB_FRAME_SENT returns to idle. MB_TX_TIMEOUT counts the incident in
+ * last_error and returns to idle: the core already aborted the transmission
+ * in its timer interrupt (DE released, reception resynchronizing), so this
+ * handler only keeps the statistic. MB_STOP stops everything via the stopped
+ * entry; MB_CONFIG is discarded and applied at the next idle entry.
  */
 QState modbus_slave_qp_sending(modbus_slave_qp* const me,
                                QEvt const* const e);

@@ -6,6 +6,9 @@
  * watchdog. This module never touches the PDU: it only decides when a frame
  * is complete and drives the serial port through the board's port. */
 
+/* Release the line and resynchronize reception after an aborted response. */
+static void abort_tx(modbus_slave_t* me);
+
 /* RX frame machine -------------------------------------------------------- */
 
 void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
@@ -95,10 +98,11 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
         }
     } else if ( mode == (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT ) {
         if ( me->tx_state == (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT ) {
-            /* Stop emitting immediately: tx_ready() ignores TXE once the
-             * machine is idle. The backend aborts the transmission (releases
-             * DE, reopens RX) when it processes the timeout event. */
-            me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
+            /* The response will never drain. Release the line here, in the
+             * interrupt: a shared RS485 segment stays blocked while DE is
+             * asserted, so recovery must not depend on when the backend's
+             * active object gets to run. */
+            abort_tx(me);
             modbus_slave_notify_tx_timeout(me);
         }
     } else {
@@ -159,7 +163,7 @@ void modbus_slave_rtu_send(modbus_slave_t* me)
 
     me->tx_len       = (uint16_t)(me->response_len + 3U);
     me->tx_pos       = 0U;
-    me->response_len = 0U; /* consumed: a second send() is rejected */
+    me->response_len = 0U; /* consumed: a second advance() finds nothing to send */
 
     /* 11 bit times per byte (start + 8 data + parity + stop) plus 10 ms of
      * margin. 64-bit math first: at low baud rates the 32-bit product would
@@ -179,16 +183,21 @@ void modbus_slave_rtu_send(modbus_slave_t* me)
     (void)me->port.serial_enable(me->port.ctx, 0U, 1U);
 }
 
-void modbus_slave_rtu_abort_tx(modbus_slave_t* me)
+static void abort_tx(modbus_slave_t* me)
 {
     me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
 
-    if ( me->timer_mode == (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT ) {
-        (void)me->port.timer_disable(me->port.ctx);
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
-    }
+    /* Resynchronize: bytes of the truncated response may still be in flight,
+     * so the receiver must see a full T3.5 of idle before it accepts the next
+     * frame. The state changes before reception opens, so no byte can slip
+     * into a frame that is about to be discarded. */
+    me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
+    me->rx_pos   = 0U;
 
-    /* Release DE and reopen reception so a stuck transmitter can never leave
-     * the slave deaf. */
+    /* Disable TXE and TC (a pending TC is cleared with it) and release DE, so
+     * the line is free for every slave again. */
     (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+
+    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
+    (void)me->port.timer_enable(me->port.ctx, me->t35_us);
 }

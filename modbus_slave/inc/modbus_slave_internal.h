@@ -78,6 +78,15 @@
 /** PDU byte index of the first data byte in 0x0F/0x10 requests. */
 #define MODBUS_SLAVE_PDU_DATA_OFFSET 6U
 
+/* Request verdict --------------------------------------------------------- */
+
+/** Verdict of the capture step inside modbus_slave_advance(). */
+enum modbus_slave_rx_status {
+    MODBUS_SLAVE_RX_IGNORE    = 0, /**< Dropped silently; reception is open again. */
+    MODBUS_SLAVE_RX_UNICAST,       /**< Addressed request that owes a response. */
+    MODBUS_SLAVE_RX_BROADCAST      /**< Accepted broadcast write; never answered. */
+};
+
 /* RX frame machine states ------------------------------------------------- */
 
 enum modbus_slave_rx_state {
@@ -124,9 +133,6 @@ void modbus_slave_rtu_tx_complete(modbus_slave_t* me);
 
 /** Assemble the ADU around the built response PDU and start transmitting. */
 void modbus_slave_rtu_send(modbus_slave_t* me);
-
-/** Abandon the transmission, release the bus, reopen reception. */
-void modbus_slave_rtu_abort_tx(modbus_slave_t* me);
 
 /** Execute the captured request; builds the response PDU into tx_buffer + 1. */
 void modbus_slave_pdu_execute(modbus_slave_t* me);

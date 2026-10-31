@@ -24,8 +24,8 @@ and commit messages use the same words as the code.
   a DIP-switch offset; a value outside 1..247 silences the slave.
 - **Application AO** — the context that receives the frame event and calls
   `advance()`. There is no library backend: the AO already serializes events.
-- **Hardware capabilities** (`modbus_slave_line_t`, `modbus_slave_timer_t`,
-  `modbus_slave_critical_t`) — the board's side: the RS485 line (direction,
+- **Hardware capabilities** (`modbus_slave_port_line_t`, `modbus_slave_port_timer_t`,
+  `modbus_slave_port_critical_t`) — the board's side: the RS485 line (direction,
   one byte out, end of stream), the one-shot timer, and a nesting interrupt
   mask. Each carries its own context.
 - **Event port** (`modbus_slave_event_port_t`) — the core's three outbound

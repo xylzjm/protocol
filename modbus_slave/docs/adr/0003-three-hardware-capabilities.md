@@ -17,9 +17,9 @@ inside its own expiry interrupt, a rule that lives only in prose.
 ## Decision
 
 1. **Three structs, one context each.**
-   - `modbus_slave_line_t`: `direction(rx, tx)`, `put_byte`, `tx_done`.
-   - `modbus_slave_timer_t`: `arm(us)`, `cancel`.
-   - `modbus_slave_critical_t`: `enter`, `exit`.
+   - `modbus_slave_port_line_t`: `direction(rx, tx)`, `put_byte`, `tx_done`.
+   - `modbus_slave_port_timer_t`: `arm(us)`, `cancel`.
+   - `modbus_slave_port_critical_t`: `enter`, `exit`.
    A board's UART and timer are different objects; the split stops forcing
    them into one merged context.
 2. **`direction(rx, tx)` stays one operation.** It is one piece of hardware;

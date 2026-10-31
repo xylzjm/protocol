@@ -65,11 +65,11 @@ hardware
 
 Five seams, each a constructor or runtime dependency:
 
-- `modbus_slave_line_t` — the **RS485 line**: direction, one byte out, end of
+- `modbus_slave_port_line_t` — the **RS485 line**: direction, one byte out, end of
   the stream. A constructor dependency in `modbus_slave_config_t`.
-- `modbus_slave_timer_t` — the **one-shot timer** behind T3.5 and the TX
+- `modbus_slave_port_timer_t` — the **one-shot timer** behind T3.5 and the TX
   watchdog. Constructor dependency.
-- `modbus_slave_critical_t` — the **nesting interrupt mask**. Constructor
+- `modbus_slave_port_critical_t` — the **nesting interrupt mask**. Constructor
   dependency. The three hardware structs carry their own `ctx`, so a board's
   UART and timer stay separate objects.
 - `modbus_slave_event_port_t` — the **event port**, a runtime dependency

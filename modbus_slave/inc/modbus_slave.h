@@ -94,7 +94,7 @@ typedef struct {
     modbus_slave_status_t (*put_byte)(void* ctx,
                                       uint8_t byte);
     modbus_slave_status_t (*tx_done)(void* ctx);
-} modbus_slave_line_t;
+} modbus_slave_port_line_t;
 
 /**
  * @brief The one-shot timer behind T3.5 and the TX watchdog.
@@ -111,7 +111,7 @@ typedef struct {
     modbus_slave_status_t (*arm)(void* ctx,
                                  uint32_t timeout_us);
     modbus_slave_status_t (*cancel)(void* ctx);
-} modbus_slave_timer_t;
+} modbus_slave_port_timer_t;
 
 /**
  * @brief Interrupt mask that nests, the way QP's critical sections do.
@@ -128,7 +128,7 @@ typedef struct {
     void* ctx;
     void (*enter)(void* ctx);
     void (*exit)(void* ctx);
-} modbus_slave_critical_t;
+} modbus_slave_port_critical_t;
 
 /* Event interface (application-provided) -------------------------- */
 
@@ -238,9 +238,9 @@ typedef struct {
     uint16_t rx_capacity; /**< >= 256. */
     uint8_t* tx_buffer;
     uint16_t tx_capacity;                /**< >= 256. */
-    modbus_slave_line_t line;            /**< Board-provided RS485 line. */
-    modbus_slave_timer_t timer;          /**< Board-provided one-shot timer. */
-    modbus_slave_critical_t critical;    /**< Board-provided nested IRQ mask. */
+    modbus_slave_port_line_t line;            /**< Board-provided RS485 line. */
+    modbus_slave_port_timer_t timer;          /**< Board-provided one-shot timer. */
+    modbus_slave_port_critical_t critical;    /**< Board-provided nested IRQ mask. */
     modbus_slave_callbacks_t callbacks;
     modbus_slave_identity_t identity;
 } modbus_slave_config_t;
@@ -254,9 +254,9 @@ typedef struct {
  */
 typedef struct modbus_slave {
     /* ---- copied at construction ---- */
-    modbus_slave_line_t line;           /**< Board-provided RS485 line. */
-    modbus_slave_timer_t timer;         /**< Board-provided one-shot timer. */
-    modbus_slave_critical_t critical;   /**< Board-provided nested IRQ mask. */
+    modbus_slave_port_line_t line;           /**< Board-provided RS485 line. */
+    modbus_slave_port_timer_t timer;         /**< Board-provided one-shot timer. */
+    modbus_slave_port_critical_t critical;   /**< Board-provided nested IRQ mask. */
     modbus_slave_callbacks_t callbacks; /**< Data space, address, ctx. */
     modbus_slave_identity_t identity;   /**< 0x11 report data. */
 

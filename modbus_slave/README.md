@@ -4,9 +4,9 @@ A Modbus RTU slave stack in portable C99. The core owns the transaction; your
 application owns the scheduling.
 
 - **Pure C core**: framing (session, RX/TX machines, T3.5 inter-frame timing,
-  TX watchdog, CRC16), PDU execution for 9 function codes, and response
-  building. The core includes only `<stdint.h>`/`<stddef.h>` — no QP, no
-  RTOS, no vendor headers — so it compiles anywhere.
+  TX watchdog, CRC16), the nine function codes, and reply building. The core
+  includes only `<stdint.h>`/`<stddef.h>` — no QP, no RTOS, no vendor headers —
+  so it compiles anywhere.
 - **One operation per frame**: the core reports a completed frame; you call
   `modbus_slave_advance()` from your own context — an active object, a task, a
   superloop — and it runs the whole transaction. The reception window never
@@ -40,11 +40,11 @@ modbus_slave/                      this stack's root
 │   ├── modbus_slave.h             public core API
 │   └── modbus_slave_internal.h    internal constants/state enums (core only)
 ├── src/                           pure C core sources
-│   ├── modbus_slave.c             ctor/start/stop, advance(), ISRs, event port
-│   ├── modbus_slave_rtu.c         RX/TX frame machines, T3.5, TX watchdog
-│   ├── modbus_slave_adu.c         frame codec: ADU layout, request/response views
-│   ├── modbus_slave_pdu.c         the 9 function codes
-│   └── modbus_slave_crc.c         CRC16/Modbus (256-entry table)
+│   ├── modbus_slave.c                 ctor/start/stop, advance(), ISRs, event port
+│   ├── modbus_slave_rtu.c             RX/TX frame machines, T3.5, TX watchdog
+│   ├── modbus_slave_adu.c             frame codec: ADU layout, request/response views
+│   ├── modbus_slave_function_code.c   the 9 function codes
+│   └── modbus_slave_crc.c             CRC16/Modbus (256-entry table)
 ```
 
 The repository root above this directory holds only the shared

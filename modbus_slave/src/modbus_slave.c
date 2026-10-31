@@ -308,7 +308,7 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
     if ( exception != MODBUS_SLAVE_EX_NONE ) {
         modbus_slave_adu_exception(&rep, req.function, exception);
     } else {
-        modbus_slave_pdu_execute(me, &req, &rep);
+        modbus_slave_fc_execute(me, &req, &rep);
     }
 
     if ( capture == MODBUS_SLAVE_CAPTURE_BROADCAST ) {

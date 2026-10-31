@@ -197,10 +197,10 @@ void modbus_slave_adu_transmit(modbus_slave_t* me,
                                const modbus_slave_request_t* req,
                                uint16_t pdu_length);
 
-/** Execute the decoded request into the reply. */
-void modbus_slave_pdu_execute(modbus_slave_t* me,
-                              const modbus_slave_request_t* req,
-                              modbus_slave_response_t* rep);
+/** Execute one decoded request: the function code decides the callback. */
+void modbus_slave_fc_execute(modbus_slave_t* me,
+                             const modbus_slave_request_t* req,
+                             modbus_slave_response_t* rep);
 
 /** Report a complete frame to the application (from the T3.5 interrupt). */
 void modbus_slave_notify_frame_received(modbus_slave_t* me);

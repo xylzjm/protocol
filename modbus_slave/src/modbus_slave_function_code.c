@@ -2,9 +2,9 @@
 
 #include "modbus_slave_internal.h"
 
-/* PDU execution: the nine supported function codes. Each handler calls the
- * matching callback and fills the reply; the frame codec (adu.c) owns every
- * byte layout, and modbus_slave_advance() sends the result. */
+/* Function codes: the nine supported ones. Each handler calls the matching
+ * callback and fills the reply; the frame codec (adu.c) owns every byte
+ * layout, and modbus_slave_advance() sends the result. */
 
 /* 0x01 / 0x02: Read Coils / Read Discrete Inputs -------------------------- */
 
@@ -126,9 +126,9 @@ static void report_slave_id(modbus_slave_t* me,
 
 /* Dispatcher -------------------------------------------------------------- */
 
-void modbus_slave_pdu_execute(modbus_slave_t* me,
-                              const modbus_slave_request_t* req,
-                              modbus_slave_response_t* rep)
+void modbus_slave_fc_execute(modbus_slave_t* me,
+                             const modbus_slave_request_t* req,
+                             modbus_slave_response_t* rep)
 {
     switch ( req->function ) {
         case MODBUS_SLAVE_FC_READ_COILS:

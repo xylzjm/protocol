@@ -191,6 +191,7 @@ QState modbus_slave_qp_idle(modbus_slave_qp* const me,
             if ( step == MODBUS_SLAVE_STEP_SENDING ) {
                 status_ = Q_TRAN(&modbus_slave_qp_sending);
             }
+            //${Shared::modbus_slave_qp::SM::idle::MB_FRAME_RCVED::[else]}
             else {
                 status_ = Q_HANDLED();
             }
@@ -228,9 +229,6 @@ QState modbus_slave_qp_sending(modbus_slave_qp* const me,
         }
         //${Shared::modbus_slave_qp::SM::sending::MB_TX_TIMEOUT}
         case MB_TX_TIMEOUT_SIG: {
-            /* The core has already aborted the transmission in its timer
-             * interrupt: DE released, TXE/TC disabled, reception resynchronizing
-             * on a fresh T3.5. Only the statistic is left to do here. */
             if ( me->last_error < 0xFFU ) {
                 me->last_error++;
             }

@@ -151,19 +151,9 @@ void modbus_slave_rtu_tx_complete(modbus_slave_t* me)
     modbus_slave_notify_frame_sent(me);
 }
 
-void modbus_slave_rtu_send(modbus_slave_t* me)
+void modbus_slave_rtu_start_tx(modbus_slave_t* me)
 {
-    uint16_t crc;
     uint32_t tx_timeout_us;
-
-    me->tx_buffer[0]                     = me->request_address;
-    crc                                  = modbus_slave_crc(me->tx_buffer, (uint16_t)(me->response_len + 1U));
-    me->tx_buffer[me->response_len + 1U] = (uint8_t)(crc & 0xFFU);
-    me->tx_buffer[me->response_len + 2U] = (uint8_t)(crc >> 8);
-
-    me->tx_len       = (uint16_t)(me->response_len + 3U);
-    me->tx_pos       = 0U;
-    me->response_len = 0U; /* consumed: a second advance() finds nothing to send */
 
     /* 11 bit times per byte (start + 8 data + parity + stop) plus 10 ms of
      * margin. 64-bit math first: at low baud rates the 32-bit product would

@@ -108,14 +108,11 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
     me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
 
     me->rx_pos       = 0U;
-    me->pdu_len      = 0U;
     me->response_len = 0U;
     me->tx_len       = 0U;
     me->tx_pos       = 0U;
 
-    me->request_address = config->address;
-    me->function        = 0U;
-    me->started         = 0U;
+    me->started = 0U;
 
     return MODBUS_SLAVE_OK;
 }
@@ -294,68 +291,12 @@ static void reopen_rx(modbus_slave_t* me)
     (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
 }
 
-/* Validate the captured ADU and apply the broadcast policy. Called only with
- * reception frozen (WAIT_PROCESS) and no transmission in progress; leaves the
- * RX machine IDLE and the transaction owning the window. */
-static enum modbus_slave_rx_status capture_request(modbus_slave_t* me)
-{
-    uint8_t address;
-    uint16_t frame_len;
-    uint16_t crc;
-
-    /* WAIT_PROCESS -> IDLE: whatever the verdict, the frame machine is free
-     * again; this transaction owns the frozen reception window now. Every
-     * exit below that ends the transaction re-opens it; the UNICAST exit
-     * hands the window over to the TX path. */
-    me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
-
-    frame_len = me->rx_pos;
-    if ( frame_len < (uint16_t)MODBUS_SLAVE_ADU_SIZE_MIN ) {
-        reopen_rx(me);
-        return MODBUS_SLAVE_RX_IGNORE;
-    }
-
-    crc = modbus_slave_crc(me->rx_buffer, (uint16_t)(frame_len - 2U));
-    if ( me->rx_buffer[frame_len - 2U] != (uint8_t)(crc & 0xFFU)
-         || me->rx_buffer[frame_len - 1U] != (uint8_t)(crc >> 8) ) {
-        reopen_rx(me);
-        return MODBUS_SLAVE_RX_IGNORE;
-    }
-
-    address = me->rx_buffer[0];
-    if ( address != me->address
-         && address != (uint8_t)MODBUS_SLAVE_ADDRESS_BROADCAST ) {
-        reopen_rx(me);
-        return MODBUS_SLAVE_RX_IGNORE;
-    }
-
-    me->request_address = address;
-    me->function        = me->rx_buffer[1];
-    me->pdu_len         = (uint16_t)(frame_len - 3U); /* address + CRC */
-
-    if ( address == (uint8_t)MODBUS_SLAVE_ADDRESS_BROADCAST ) {
-        switch ( me->function ) {
-            case MODBUS_SLAVE_FC_WRITE_SINGLE_COIL:
-            case MODBUS_SLAVE_FC_WRITE_SINGLE_REGISTER:
-            case MODBUS_SLAVE_FC_WRITE_MULTIPLE_COILS:
-            case MODBUS_SLAVE_FC_WRITE_MULTIPLE_REGS:
-                /* advance() executes it and re-opens reception when it is
-                 * done with the buffer; a broadcast is never answered. */
-                return MODBUS_SLAVE_RX_BROADCAST;
-
-            default:
-                /* Broadcast reads (and 0x11) are ignored, no callback runs. */
-                reopen_rx(me);
-                return MODBUS_SLAVE_RX_IGNORE;
-        }
-    }
-
-    return MODBUS_SLAVE_RX_UNICAST;
-}
-
 modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
 {
-    enum modbus_slave_rx_status status;
+    modbus_slave_request_t   req = { 0U };
+    modbus_slave_response_t  rep = { 0U };
+    modbus_slave_exception_t exception;
+    enum modbus_slave_capture capture;
 
     if ( me == NULL || me->started == 0U ) {
         return MODBUS_SLAVE_STEP_NONE;
@@ -371,21 +312,31 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
         return MODBUS_SLAVE_STEP_NONE;
     }
 
-    status = capture_request(me);
-    if ( status == MODBUS_SLAVE_RX_IGNORE ) {
-        return MODBUS_SLAVE_STEP_HANDLED; /* capture_request re-opened RX */
+    /* WAIT_PROCESS is over: this transaction owns the frozen window from here
+     * on, and every exit below either re-opens it or hands it to the TX path. */
+    me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
+
+    capture = modbus_slave_adu_capture(me, &req);
+    if ( capture == MODBUS_SLAVE_CAPTURE_IGNORE ) {
+        reopen_rx(me);
+        return MODBUS_SLAVE_STEP_HANDLED;
     }
 
-    modbus_slave_pdu_execute(me);
+    exception = modbus_slave_adu_decode(me, &req);
+    if ( exception != MODBUS_SLAVE_EX_NONE ) {
+        modbus_slave_adu_exception(&rep, req.function, exception);
+    } else {
+        modbus_slave_pdu_execute(me, &req, &rep);
+    }
 
-    if ( status == MODBUS_SLAVE_RX_BROADCAST ) {
+    if ( capture == MODBUS_SLAVE_CAPTURE_BROADCAST ) {
         /* A broadcast is never answered, so the transaction ends here and
          * this is the only place that releases its window. */
         reopen_rx(me);
         return MODBUS_SLAVE_STEP_HANDLED;
     }
 
-    if ( me->response_len == 0U ) {
+    if ( rep.function == 0U ) {
         /* Nothing to send (defensive: a unicast always builds a reply, if
          * only an exception). The transaction ends here as well. */
         reopen_rx(me);
@@ -395,7 +346,8 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
     /* Wrap the reply in an ADU, arm the watchdog and start transmitting.
      * Reception stays frozen -- the request buffer must not change under the
      * transmitter -- and the TX path releases it at TC or on the watchdog. */
-    modbus_slave_rtu_send(me);
+    modbus_slave_adu_finish(me, &rep);
+    modbus_slave_adu_transmit(me, &req);
     return MODBUS_SLAVE_STEP_SENDING;
 }
 

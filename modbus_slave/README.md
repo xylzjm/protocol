@@ -40,7 +40,8 @@ modbus_slave/                      this stack's root
 │   └── modbus_slave_internal.h    internal constants/state enums (core only)
 ├── src/                           pure C core sources
 │   ├── modbus_slave.c             ctor/start/stop, advance(), ISRs, event port
-│   ├── modbus_slave_rtu.c         RX/TX frame machines, T3.5, TX watchdog, ADU
+│   ├── modbus_slave_rtu.c         RX/TX frame machines, T3.5, TX watchdog
+│   ├── modbus_slave_adu.c         frame codec: ADU layout, request/response views
 │   ├── modbus_slave_pdu.c         the 9 function codes
 │   └── modbus_slave_crc.c         CRC16/Modbus (256-entry table)
 └── backend/                       backends
@@ -336,7 +337,7 @@ AO's queue/stack.
 
 ## Building
 
-The core is four `.c` files under `src/` plus the two headers under `inc/`.
+The core is five `.c` files under `src/` plus the two headers under `inc/`.
 Add `src/*.c` and put `inc/` on the include path — no QP include paths
 required. The QP backend adds `backend/qp/modbus_slave_qp.c`; it additionally
 needs `backend/qp/` on the include path, the QP/C 8.x include path and a port
@@ -366,7 +367,9 @@ format pass.
 
 `test/test_modbus_slave.c` drives the core through its public interface: a
 fake board supplies the hardware port and the three events, the test feeds ADU
-bytes, and it checks the bytes that would reach the wire. There is no
+bytes, and it checks the bytes that would reach the wire. A second part checks
+the frame codec's decode table directly — a request PDU in, a request view or
+an exception out, with no port and no interrupt involved. There is no
 framework and nothing is compiled into the library:
 
 ```sh

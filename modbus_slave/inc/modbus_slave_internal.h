@@ -78,14 +78,49 @@
 /** PDU byte index of the first data byte in 0x0F/0x10 requests. */
 #define MODBUS_SLAVE_PDU_DATA_OFFSET 6U
 
+/** ADU byte index of the first reply payload byte: address, function, count. */
+#define MODBUS_SLAVE_ADU_PAYLOAD_OFFSET 3U
+
 /* Request verdict --------------------------------------------------------- */
 
-/** Verdict of the capture step inside modbus_slave_advance(). */
-enum modbus_slave_rx_status {
-    MODBUS_SLAVE_RX_IGNORE    = 0, /**< Dropped silently; reception is open again. */
-    MODBUS_SLAVE_RX_UNICAST,       /**< Addressed request that owes a response. */
-    MODBUS_SLAVE_RX_BROADCAST      /**< Accepted broadcast write; never answered. */
+/** Verdict of modbus_slave_adu_capture(): what the captured frame is. */
+enum modbus_slave_capture {
+    MODBUS_SLAVE_CAPTURE_IGNORE    = 0, /**< Dropped silently; reception must reopen. */
+    MODBUS_SLAVE_CAPTURE_UNICAST,       /**< Addressed request that owes a response. */
+    MODBUS_SLAVE_CAPTURE_BROADCAST      /**< Accepted broadcast write; never answered. */
 };
+
+/** Request kinds: the shapes the frame codec knows how to decode. */
+enum modbus_slave_request_kind {
+    MODBUS_SLAVE_REQ_READ_BITS = 0, /**< Function codes 0x01 and 0x02. */
+    MODBUS_SLAVE_REQ_READ_REGS,     /**< 0x03 and 0x04. */
+    MODBUS_SLAVE_REQ_WRITE_SINGLE_COIL,
+    MODBUS_SLAVE_REQ_WRITE_SINGLE_REG,
+    MODBUS_SLAVE_REQ_WRITE_BITS,
+    MODBUS_SLAVE_REQ_WRITE_REGS,
+    MODBUS_SLAVE_REQ_REPORT_ID
+};
+
+/** @brief Decoded request: what the frame asks for, and the bytes it came from. */
+typedef struct {
+    uint8_t  address;      /**< Address byte of the ADU. */
+    uint8_t  function;     /**< Function code. */
+    uint8_t  kind;         /**< enum modbus_slave_request_kind. */
+    uint16_t pdu_length;   /**< Bytes of PDU in the receive buffer. */
+    uint16_t start;        /**< First address. */
+    uint16_t quantity;     /**< Items requested; 1 for a single write. */
+    uint8_t* data;         /**< Write payload; read-only for the callback. */
+    uint16_t data_length;  /**< Payload bytes. */
+    uint8_t  coil_value;   /**< Packed bit for write-single-coil. */
+} modbus_slave_request_t;
+
+/** @brief Reply being built; the codec turns it into tx_buffer[1..]. */
+typedef struct {
+    uint8_t  function;   /**< 0 until a reply is built. */
+    uint16_t byte_count; /**< Payload length of a read/report reply. */
+    uint8_t  echo;       /**< The reply is a copy of the request head. */
+    uint8_t  exception;  /**< Non-zero: exception reply. */
+} modbus_slave_response_t;
 
 /* RX frame machine states ------------------------------------------------- */
 
@@ -131,11 +166,49 @@ void modbus_slave_rtu_tx_ready(modbus_slave_t* me);
 /** TC machine: close TX, reopen RX, notify the backend. */
 void modbus_slave_rtu_tx_complete(modbus_slave_t* me);
 
-/** Assemble the ADU around the built response PDU and start transmitting. */
-void modbus_slave_rtu_send(modbus_slave_t* me);
+/** Arm the TX watchdog and switch the port to transmit. */
+void modbus_slave_rtu_start_tx(modbus_slave_t* me);
 
-/** Execute the captured request; builds the response PDU into tx_buffer + 1. */
-void modbus_slave_pdu_execute(modbus_slave_t* me);
+/* Frame codec (src/modbus_slave_adu.c) ------------------------------------ */
+
+/** Capture the ADU in rx_buffer: length, CRC, address and broadcast policy. */
+enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
+                                                   modbus_slave_request_t* req);
+
+/** Decode the request shape: one validation order, one exception. */
+modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
+                                                 modbus_slave_request_t* req);
+
+/** Point the reply at its payload area and record the function code. */
+uint8_t* modbus_slave_adu_payload(modbus_slave_t* me,
+                                  modbus_slave_response_t* rep,
+                                  uint8_t function);
+
+/** Record the payload length of a read or report reply. */
+void modbus_slave_adu_byte_count(modbus_slave_response_t* rep,
+                                 uint16_t count);
+
+/** Make the reply a copy of the request head (the write replies). */
+void modbus_slave_adu_echo(modbus_slave_response_t* rep,
+                           uint8_t function);
+
+/** Make the reply an exception. */
+void modbus_slave_adu_exception(modbus_slave_response_t* rep,
+                                uint8_t function,
+                                modbus_slave_exception_t exception);
+
+/** Encode the reply into tx_buffer[1..] and set response_len. */
+void modbus_slave_adu_finish(modbus_slave_t* me,
+                             const modbus_slave_response_t* rep);
+
+/** Prepend the address, append the CRC and hand the ADU to the TX machine. */
+void modbus_slave_adu_transmit(modbus_slave_t* me,
+                               const modbus_slave_request_t* req);
+
+/** Execute the decoded request into the reply. */
+void modbus_slave_pdu_execute(modbus_slave_t* me,
+                              const modbus_slave_request_t* req,
+                              modbus_slave_response_t* rep);
 
 /** Report a complete frame to the backend (from the T3.5 interrupt). */
 void modbus_slave_notify_frame_received(modbus_slave_t* me);

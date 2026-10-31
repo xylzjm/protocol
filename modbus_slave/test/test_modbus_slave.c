@@ -4,8 +4,11 @@
  * Host test for the modbus_slave core.
  *
  * Drives the public seam -- advance(), the ISR entry points, start/stop -- with
- * a fake board and checks the bytes that would reach the wire. No framework and
- * no instrumentation: build the four core sources plus this file.
+ * a fake board and checks the bytes that would reach the wire. A second part
+ * checks the frame codec's request shapes directly: decoding needs no port and
+ * no interrupt, only the captured bytes.
+ *
+ * No framework and no instrumentation: build the core sources plus this file.
  *
  * The expected ADU is built here with an independent bit-wise CRC16, so a bug
  * in the table-driven implementation is not masked by the test.
@@ -14,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "modbus_slave.h"
+#include "modbus_slave_internal.h"
 
 #define SLAVE_ADDR 1U
 #define BAUDRATE   9600U
@@ -745,6 +748,104 @@ static void test_start_mid_tx(void)
     CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_OK);
 }
 
+/* Frame codec: request shapes --------------------------------------------- */
+
+/* Capture one ADU into the receive buffer and run the decoder on it. No port
+ * is involved: the codec only reads bytes and fills the request view. */
+static void check_shape(const uint8_t* pdu,
+                        uint16_t pdu_len,
+                        uint8_t kind,
+                        uint16_t start,
+                        uint16_t quantity,
+                        modbus_slave_exception_t expected)
+{
+    modbus_slave_request_t req = { 0U };
+    uint16_t n = 0U;
+    uint16_t crc;
+    uint16_t i;
+
+    rx_buffer[n] = (uint8_t)SLAVE_ADDR;
+    n++;
+    for ( i = 0U; i < pdu_len; ++i ) {
+        rx_buffer[n] = pdu[i];
+        n++;
+    }
+    crc          = crc16(rx_buffer, (int)n);
+    rx_buffer[n] = (uint8_t)(crc & 0xFFU);
+    n++;
+    rx_buffer[n] = (uint8_t)(crc >> 8);
+    n++;
+    slave.rx_pos = n;
+
+    CHECK(modbus_slave_adu_capture(&slave, &req) == MODBUS_SLAVE_CAPTURE_UNICAST);
+    CHECK(req.function == pdu[0]);
+    CHECK(modbus_slave_adu_decode(&slave, &req) == expected);
+    if ( expected == MODBUS_SLAVE_EX_NONE ) {
+        CHECK(req.kind == kind);
+        CHECK(req.start == start);
+        CHECK(req.quantity == quantity);
+    }
+}
+
+static void test_request_shapes(void)
+{
+    static const uint8_t bits_max[] = { 0x01U, 0x00U, 0x00U, 0x07U, 0xD0U };
+    static const uint8_t bits_over[] = { 0x01U, 0x00U, 0x00U, 0x07U, 0xD1U };
+    static const uint8_t regs_max[] = { 0x03U, 0x00U, 0x00U, 0x00U, 0x7DU };
+    static const uint8_t regs_over[] = { 0x03U, 0x00U, 0x00U, 0x00U, 0x7EU };
+    static const uint8_t regs_zero[] = { 0x03U, 0x00U, 0x00U, 0x00U, 0x00U };
+    static const uint8_t coil_on[] = { 0x05U, 0x00U, 0x03U, 0xFFU, 0x00U };
+    static const uint8_t coil_bad[] = { 0x05U, 0x00U, 0x03U, 0x12U, 0x34U };
+    static const uint8_t reg_one[] = { 0x06U, 0x00U, 0x02U, 0xBEU, 0xEFU };
+    static const uint8_t coils_many[] = { 0x0FU, 0x00U, 0x03U, 0x00U, 0x0AU,
+                                          0x02U, 0xFFU, 0x03U };
+    static const uint8_t coils_bad_bc[] = { 0x0FU, 0x00U, 0x03U, 0x00U, 0x0AU,
+                                            0x03U, 0xFFU, 0x03U, 0x00U };
+    static const uint8_t regs_many[] = { 0x10U, 0x00U, 0x00U, 0x00U, 0x02U,
+                                         0x04U, 0xBEU, 0xEFU, 0x01U, 0x02U };
+    static const uint8_t regs_bad_bc[] = { 0x10U, 0x00U, 0x00U, 0x00U, 0x02U,
+                                           0x02U, 0xBEU, 0xEFU };
+    static const uint8_t report[] = { 0x11U };
+    static const uint8_t report_long[] = { 0x11U, 0x00U };
+    static const uint8_t unsupported[] = { 0x08U, 0x00U, 0x00U, 0x12U, 0x34U };
+    static const uint8_t short_pdu[] = { 0x03U, 0x00U, 0x00U };
+
+    setup();
+
+    check_shape(bits_max, 5U, MODBUS_SLAVE_REQ_READ_BITS, 0U, 2000U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(bits_over, 5U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(regs_max, 5U, MODBUS_SLAVE_REQ_READ_REGS, 0U, 125U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(regs_over, 5U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(regs_zero, 5U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(coil_on, 5U, MODBUS_SLAVE_REQ_WRITE_SINGLE_COIL, 3U, 1U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(coil_bad, 5U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(reg_one, 5U, MODBUS_SLAVE_REQ_WRITE_SINGLE_REG, 2U, 1U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(coils_many, 8U, MODBUS_SLAVE_REQ_WRITE_BITS, 3U, 10U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(coils_bad_bc, 9U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(regs_many, 10U, MODBUS_SLAVE_REQ_WRITE_REGS, 0U, 2U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(regs_bad_bc, 8U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(report, 1U, MODBUS_SLAVE_REQ_REPORT_ID, 0U, 0U,
+                MODBUS_SLAVE_EX_NONE);
+    check_shape(report_long, 2U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+    check_shape(unsupported, 5U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_FUNCTION);
+    check_shape(short_pdu, 3U, 0U, 0U, 0U,
+                MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
+}
+
 int main(void)
 {
     test_start();
@@ -767,6 +868,7 @@ int main(void)
     test_tx_timeout();
     test_apply_config();
     test_start_mid_tx();
+    test_request_shapes();
 
     printf("%d checks, %d failures\n", checks, failures);
     return (failures == 0) ? 0 : 1;

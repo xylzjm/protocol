@@ -249,13 +249,10 @@ typedef struct modbus_slave {
     uint8_t timer_mode; /**< modbus_slave_timer_mode_t. */
 
     uint16_t rx_pos;       /**< Bytes of the current ADU in rx_buffer. */
-    uint16_t pdu_len;      /**< Request PDU length. */
     uint16_t response_len; /**< Built response PDU length; 0 when none is pending. */
     uint16_t tx_len;       /**< ADU length being transmitted. */
     uint16_t tx_pos;       /**< Index of the next byte to transmit. */
 
-    uint8_t request_address; /**< Address of the current request. */
-    uint8_t function;        /**< Current function code. */
     uint8_t started;         /**< modbus_slave_start() has run. */
 } modbus_slave_t;
 

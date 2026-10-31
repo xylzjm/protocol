@@ -298,7 +298,7 @@ static int in_service;
 static int setup(void)
 {
     modbus_slave_config_t     cfg;
-    modbus_slave_event_port_t events;
+    modbus_slave_port_event_t events;
 
     if ( in_service != 0 ) {
         /* The core must be stopped before it is constructed again. */

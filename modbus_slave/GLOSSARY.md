@@ -28,7 +28,7 @@ and commit messages use the same words as the code.
   `modbus_slave_port_critical_t`) — the board's side: the RS485 line (direction,
   one byte out, end of stream), the one-shot timer, and a nesting interrupt
   mask. Each carries its own context.
-- **Event port** (`modbus_slave_event_port_t`) — the core's three outbound
+- **Event port** (`modbus_slave_port_event_t`) — the core's three outbound
   notifications, called from interrupt context.
 - **Broadcast** — slave address 0. Write function codes execute; nothing is
   ever answered.

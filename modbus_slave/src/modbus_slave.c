@@ -94,10 +94,10 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
     me->baudrate = config->baudrate;
     me->t35_us   = t35_from_baudrate(config->baudrate);
 
-    me->event_port.ctx               = NULL;
-    me->event_port.on_frame_received = NULL;
-    me->event_port.on_frame_sent     = NULL;
-    me->event_port.on_tx_timeout     = NULL;
+    me->event.ctx               = NULL;
+    me->event.on_frame_received = NULL;
+    me->event.on_frame_sent     = NULL;
+    me->event.on_tx_timeout     = NULL;
 
     me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
 
@@ -112,7 +112,7 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
 
 modbus_slave_status_t modbus_slave_set_event_port(
     modbus_slave_t* me,
-    const modbus_slave_event_port_t* event_port)
+    const modbus_slave_port_event_t* event_port)
 {
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
@@ -122,12 +122,12 @@ modbus_slave_status_t modbus_slave_set_event_port(
     }
 
     if ( event_port == NULL ) {
-        me->event_port.ctx               = NULL;
-        me->event_port.on_frame_received = NULL;
-        me->event_port.on_frame_sent     = NULL;
-        me->event_port.on_tx_timeout     = NULL;
+        me->event.ctx               = NULL;
+        me->event.on_frame_received = NULL;
+        me->event.on_frame_sent     = NULL;
+        me->event.on_tx_timeout     = NULL;
     } else {
-        me->event_port = *event_port;
+        me->event = *event_port;
     }
     return MODBUS_SLAVE_OK;
 }
@@ -370,21 +370,21 @@ void modbus_slave_put_u16(uint8_t* buffer,
 
 void modbus_slave_notify_frame_received(modbus_slave_t* me)
 {
-    if ( me->event_port.on_frame_received != NULL ) {
-        me->event_port.on_frame_received(me->event_port.ctx);
+    if ( me->event.on_frame_received != NULL ) {
+        me->event.on_frame_received(me->event.ctx);
     }
 }
 
 void modbus_slave_notify_frame_sent(modbus_slave_t* me)
 {
-    if ( me->event_port.on_frame_sent != NULL ) {
-        me->event_port.on_frame_sent(me->event_port.ctx);
+    if ( me->event.on_frame_sent != NULL ) {
+        me->event.on_frame_sent(me->event.ctx);
     }
 }
 
 void modbus_slave_notify_tx_timeout(modbus_slave_t* me)
 {
-    if ( me->event_port.on_tx_timeout != NULL ) {
-        me->event_port.on_tx_timeout(me->event_port.ctx);
+    if ( me->event.on_tx_timeout != NULL ) {
+        me->event.on_tx_timeout(me->event.ctx);
     }
 }

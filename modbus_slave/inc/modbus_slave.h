@@ -17,7 +17,7 @@
  *   RS485 line (direction, byte output, end of stream), the one-shot timer,
  *   and an interrupt mask that nests.
  * - The application drives the core: it receives frame events through
- *   modbus_slave_event_port_t and calls modbus_slave_advance() once per
+ *   modbus_slave_port_event_t and calls modbus_slave_advance() once per
  *   frame, in its own context. The transaction and the reception window
  *   belong to the core; the application never switches the serial direction.
  * - The slave address is not stored: the callbacks answer it before every
@@ -148,7 +148,7 @@ typedef struct {
     void (*on_frame_received)(void* ctx);
     void (*on_frame_sent)(void* ctx);
     void (*on_tx_timeout)(void* ctx);
-} modbus_slave_event_port_t;
+} modbus_slave_port_event_t;
 
 /* Register/coil callbacks ------------------------------------------------- */
 
@@ -269,7 +269,7 @@ typedef struct modbus_slave {
     uint32_t t35_us;   /**< T3.5 derived from baudrate. */
 
     /* ---- event port ---- */
-    modbus_slave_event_port_t event_port;
+    modbus_slave_port_event_t event; /**< Application's event callbacks. */
 
     /* ---- runtime state (private) ---- */
     uint8_t session; /**< modbus_slave_session_t: what the core is doing. */
@@ -309,7 +309,7 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
  */
 modbus_slave_status_t modbus_slave_set_event_port(
     modbus_slave_t* me,
-    const modbus_slave_event_port_t* event_port);
+    const modbus_slave_port_event_t* event_port);
 
 /**
  * @brief Start the slave: open reception and resynchronize on bus idle.

@@ -72,7 +72,7 @@ Five seams, each a constructor or runtime dependency:
 - `modbus_slave_port_critical_t` — the **nesting interrupt mask**. Constructor
   dependency. The three hardware structs carry their own `ctx`, so a board's
   UART and timer stay separate objects.
-- `modbus_slave_event_port_t` — the **event port**, a runtime dependency
+- `modbus_slave_port_event_t` — the **event port**, a runtime dependency
   attached with `modbus_slave_set_event_port()` **before**
   `modbus_slave_start()` (after start it returns `MODBUS_SLAVE_ERR_STATE`).
   `NULL` detaches the port: the core keeps working but drops events.

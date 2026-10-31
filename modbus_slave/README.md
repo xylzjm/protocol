@@ -33,6 +33,8 @@ modbus_slave/                      this stack's root
 ├── LICENSE-GPL-3.0                license of backend/qp/
 ├── docs/adr/                      architecture decisions (ADR-0001: the core
 │                                  owns the transaction and its reception window)
+├── test/                          host test with a fake board
+│   └── test_modbus_slave.c
 ├── inc/                           core headers
 │   ├── modbus_slave.h             public core API
 │   └── modbus_slave_internal.h    internal constants/state enums (core only)
@@ -359,6 +361,23 @@ the sources are kept format-clean. This includes the QM-generated backend
 files — hook `clang-format -i` into QM's External Tools (F8, with "Generate
 code before launching" checked) so every generation is followed by a
 format pass.
+
+## Testing
+
+`test/test_modbus_slave.c` drives the core through its public interface: a
+fake board supplies the hardware port and the three events, the test feeds ADU
+bytes, and it checks the bytes that would reach the wire. There is no
+framework and nothing is compiled into the library:
+
+```sh
+gcc -std=c99 -Wall -Wextra -Werror -pedantic -I modbus_slave/inc \
+    modbus_slave/src/*.c modbus_slave/test/test_modbus_slave.c -o test_modbus_slave
+./test_modbus_slave
+```
+
+It prints `N checks, M failures` and exits non-zero on failure. Expected
+frames are rebuilt with an independent bit-wise CRC16, so the table-driven CRC
+never verifies itself.
 
 ## Licensing
 

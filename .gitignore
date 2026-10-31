@@ -1,3 +1,7 @@
 # QM session files — machine-specific (window layout, license location),
 # unlike model.qm which is the versioned source of truth.
 *.qms
+
+# Host test binary (see README "Testing")
+test_modbus_slave
+test_modbus_slave.exe

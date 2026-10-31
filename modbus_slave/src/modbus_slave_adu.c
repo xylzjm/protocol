@@ -57,6 +57,7 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
     uint16_t frame_len = me->rx_pos;
     uint16_t crc;
     uint8_t address;
+    uint8_t mine;
 
     if ( frame_len < (uint16_t)MODBUS_SLAVE_ADU_SIZE_MIN ) {
         return MODBUS_SLAVE_CAPTURE_IGNORE;
@@ -68,8 +69,18 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
         return MODBUS_SLAVE_CAPTURE_IGNORE;
     }
 
+    /* The address is a question, not stored state: ask it once per frame so a
+     * register write or a DIP-switch change applies to the next one. An
+     * out-of-range answer leaves the slave silent instead of making every
+     * frame look like a broadcast. */
+    mine = me->callbacks.address(me->callbacks.ctx);
+    if ( mine < (uint8_t)MODBUS_SLAVE_ADDRESS_MIN
+         || mine > (uint8_t)MODBUS_SLAVE_ADDRESS_MAX ) {
+        return MODBUS_SLAVE_CAPTURE_IGNORE;
+    }
+
     address = me->rx_buffer[0];
-    if ( address != me->address
+    if ( address != mine
          && address != (uint8_t)MODBUS_SLAVE_ADDRESS_BROADCAST ) {
         return MODBUS_SLAVE_CAPTURE_IGNORE;
     }

@@ -3,7 +3,7 @@
 #include "modbus_slave_internal.h"
 
 /* Core object: construction, lifecycle, the receive/execute/send primitives
- * the backend drives, the ISR entry points, the event port and the
+ * the application drives, the ISR entry points, the event port and the
  * configuration helpers. */
 
 /* T3.5 -------------------------------------------------------------------- */
@@ -26,10 +26,6 @@ static uint8_t config_valid(const modbus_slave_config_t* config)
     uintptr_t tx_low;
     uintptr_t tx_high;
 
-    if ( config->address < MODBUS_SLAVE_ADDRESS_MIN
-         || config->address > MODBUS_SLAVE_ADDRESS_MAX ) {
-        return 0U;
-    }
     if ( config->baudrate == 0U ) {
         return 0U;
     }
@@ -62,7 +58,8 @@ static uint8_t config_valid(const modbus_slave_config_t* config)
     if ( config->callbacks.coils == NULL
          || config->callbacks.discrete_inputs == NULL
          || config->callbacks.holding_registers == NULL
-         || config->callbacks.input_registers == NULL ) {
+         || config->callbacks.input_registers == NULL
+         || config->callbacks.address == NULL ) {
         return 0U;
     }
 
@@ -92,11 +89,8 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
     me->rx_capacity     = config->rx_capacity;
     me->tx_buffer       = config->tx_buffer;
     me->tx_capacity     = config->tx_capacity;
-    me->baudrate        = config->baudrate;
-    me->t35_us          = t35_from_baudrate(config->baudrate);
-    me->address         = config->address;
-    me->pending_address = config->address;
-    me->address_pending = 0U;
+    me->baudrate = config->baudrate;
+    me->t35_us   = t35_from_baudrate(config->baudrate);
 
     me->event_port.ctx               = NULL;
     me->event_port.on_frame_received = NULL;
@@ -179,7 +173,7 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
         }
     } else if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_DISCARDING
                 || me->session == (uint8_t)MODBUS_SLAVE_SESSION_IDLE ) {
-        /* Idempotent re-entry (e.g. the backend's IDLE entry): make sure
+        /* Idempotent re-entry (e.g. the application's serving entry): make sure
          * reception is on without disturbing a frame in collection. */
         if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
              != MODBUS_SLAVE_OK ) {
@@ -271,7 +265,7 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me)
     return MODBUS_SLAVE_OK;
 }
 
-/* The backend's one operation per frame ------------------------------------ */
+/* The application's one operation per frame -------------------------------- */
 
 static void reopen_rx(modbus_slave_t* me)
 {
@@ -296,7 +290,7 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
          * now is stale; leave everything as it is. */
         return MODBUS_SLAVE_STEP_SENDING;
     }
-    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_WAITING ) {
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_CAPTURED ) {
         /* No frozen window is held by anyone (stray event, or stopped). */
         return MODBUS_SLAVE_STEP_NONE;
     }
@@ -339,65 +333,14 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
     return MODBUS_SLAVE_STEP_SENDING;
 }
 
-/* Configuration ----------------------------------------------------------- */
-
-void modbus_slave_set_address_pending(modbus_slave_t* me,
-                                      uint8_t address)
-{
-    if ( me == NULL || address < MODBUS_SLAVE_ADDRESS_MIN
-         || address > MODBUS_SLAVE_ADDRESS_MAX ) {
-        return;
-    }
-    me->pending_address = address;
-    me->address_pending = 1U;
-}
-
-modbus_slave_status_t modbus_slave_apply_config(modbus_slave_t* me)
-{
-    uint32_t token;
-
-    if ( me == NULL ) {
-        return MODBUS_SLAVE_ERR_ARG;
-    }
-    if ( me->address_pending == 0U ) {
-        return MODBUS_SLAVE_OK;
-    }
-
-    token = me->port.critical_enter(me->port.ctx);
-
-    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING ) {
-        /* A response owns the window: swapping the address now would corrupt
-         * it. Keep the pending address for a later call. */
-        me->port.critical_exit(me->port.ctx, token);
-        return MODBUS_SLAVE_ERR_STATE;
-    }
-
-    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
-        /* Mute reception and disarm the frame timer, so the next request
-         * cannot merge with bytes of the frame this swap interrupts. */
-        (void)me->port.timer_disable(me->port.ctx);
-        (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
-    }
-
-    me->address         = me->pending_address;
-    me->address_pending = 0U;
-
-    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
-        /* Re-open reception and wait out one T3.5 of bus idle, exactly like
-         * start(), so the first request after the swap is framed cleanly. */
-        modbus_slave_rtu_resync(me);
-    }
-
-    me->port.critical_exit(me->port.ctx, token);
-    return MODBUS_SLAVE_OK;
-}
+/* Address ----------------------------------------------------------------- */
 
 uint8_t modbus_slave_get_address(const modbus_slave_t* me)
 {
     if ( me == NULL ) {
         return 0U;
     }
-    return me->address;
+    return me->callbacks.address(me->callbacks.ctx);
 }
 
 void modbus_slave_set_running(modbus_slave_t* me,

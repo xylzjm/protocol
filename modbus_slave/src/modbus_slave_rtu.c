@@ -54,7 +54,7 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
             break;
 
         case MODBUS_SLAVE_SESSION_STOPPED:
-        case MODBUS_SLAVE_SESSION_WAITING:
+        case MODBUS_SLAVE_SESSION_CAPTURED:
         case MODBUS_SLAVE_SESSION_SENDING:
         default:
             /* Reception is off or frozen: a stray byte must neither start a
@@ -75,8 +75,8 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
 
         case MODBUS_SLAVE_SESSION_RECEIVING:
             /* End of frame: freeze reception so the next request cannot
-             * overwrite this one while the backend processes it. */
-            me->session = (uint8_t)MODBUS_SLAVE_SESSION_WAITING;
+             * overwrite this one while the application processes it. */
+            me->session = (uint8_t)MODBUS_SLAVE_SESSION_CAPTURED;
             (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
             modbus_slave_notify_frame_received(me);
             break;
@@ -84,7 +84,7 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
         case MODBUS_SLAVE_SESSION_SENDING:
             /* The response will never drain. Release the line here, in the
              * interrupt: a shared RS485 segment stays blocked while DE is
-             * asserted, so recovery must not depend on when the backend's
+             * asserted, so recovery must not depend on when the application's
              * active object gets to run. */
             modbus_slave_rtu_resync(me);
             modbus_slave_notify_tx_timeout(me);
@@ -92,7 +92,7 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
 
         case MODBUS_SLAVE_SESSION_STOPPED:
         case MODBUS_SLAVE_SESSION_IDLE:
-        case MODBUS_SLAVE_SESSION_WAITING:
+        case MODBUS_SLAVE_SESSION_CAPTURED:
         default:
             /* No timer is armed in these states; a spurious expiry is a no-op. */
             break;

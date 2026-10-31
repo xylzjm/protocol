@@ -3,6 +3,10 @@
 - **Status:** accepted (2026-10-30)
 - **Supersedes:** §4.6 of the implementation plan ("reception window
   ownership"), which described the same rule in prose only.
+- **Superseded in part by:** ADR-0002 — the address is a callback now; the
+  cached address, the pending address and `apply_config()` are gone.
+- **No backend ships.** The application drives the core from its own AO; see
+  "Driving it from an application AO" in `README.md`.
 
 ## Context
 
@@ -47,7 +51,8 @@ Two failure modes came from that split:
   earlier, after a full T3.5 gap.
 - `apply_config()` is only legal while no reply is on the wire; the core
   returns `MODBUS_SLAVE_ERR_STATE` otherwise, and it resynchronizes reception
-  around the address swap.
+  around the address swap. *(Superseded by ADR-0002: the address is a callback,
+  so there is no apply step.)*
 - The core now holds one more policy: it recovers unconditionally. A backend
   can observe and log the timeout, but cannot delay the recovery.
 

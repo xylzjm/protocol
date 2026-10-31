@@ -148,10 +148,19 @@ typedef struct {
     uint16_t input[8];
     uint8_t  coils[16];
     uint8_t  discrete[16];
+    uint8_t  address_offset; /* stands in for the DIP switch */
     int      calls;
 } store_t;
 
 static store_t store;
+
+/* The address register (holding[7]) is the base; the offset plays the part of
+ * the DIP switch. Out-of-range combinations are the core's to reject. */
+static uint8_t test_address(void* ctx)
+{
+    (void)ctx;
+    return (uint8_t)(store.holding[7] + store.address_offset);
+}
 
 static modbus_slave_exception_t bits_impl(uint8_t* bits,
                                           uint16_t start,
@@ -298,7 +307,9 @@ static int setup(void)
     memset(&slave, 0, sizeof slave);
     memset(&cfg, 0, sizeof cfg);
 
-    cfg.address     = (uint8_t)SLAVE_ADDR;
+    /* Holding register 7 is the address base; the offset is the DIP switch. */
+    store.holding[7] = (uint16_t)SLAVE_ADDR;
+
     cfg.baudrate    = BAUDRATE;
     cfg.rx_buffer   = rx_buffer;
     cfg.rx_capacity = (uint16_t)sizeof rx_buffer;
@@ -319,6 +330,7 @@ static int setup(void)
     cfg.callbacks.discrete_inputs   = discrete_cb;
     cfg.callbacks.holding_registers = holding_cb;
     cfg.callbacks.input_registers   = input_cb;
+    cfg.callbacks.address           = test_address;
 
     cfg.identity.slave_id         = 0x22U;
     cfg.identity.is_running       = 1U;
@@ -383,6 +395,12 @@ static void feed(uint8_t address,
     feed_frame(address, body, body_len, 0);
 }
 
+/* Forget the bytes already transmitted, so the next reply starts at index 0. */
+static void clear_tx(void)
+{
+    port.tx_len = 0;
+}
+
 /* Drive TXE until the whole ADU has been written, then close with TC. */
 static void finish_tx(void)
 {
@@ -394,15 +412,16 @@ static void finish_tx(void)
     (void)modbus_slave_tx_complete(&slave);
 }
 
-static void expect_adu(const uint8_t* pdu,
-                       int pdu_len)
+static void expect_adu_at(uint8_t address,
+                          const uint8_t* pdu,
+                          int pdu_len)
 {
     uint8_t  expected[300];
     int      n = 0;
     int      i;
     uint16_t crc;
 
-    expected[n] = (uint8_t)SLAVE_ADDR;
+    expected[n] = address;
     n++;
     for ( i = 0; i < pdu_len; ++i ) {
         expected[n] = pdu[i];
@@ -416,8 +435,26 @@ static void expect_adu(const uint8_t* pdu,
 
     CHECK(port.tx_len == n);
     if ( port.tx_len == n ) {
+        if ( memcmp(port.tx_bytes, expected, (size_t)n) != 0 ) {
+            int k;
+            printf("  ADU mismatch\n    expected:");
+            for ( k = 0; k < n; ++k ) {
+                printf(" %02X", expected[k]);
+            }
+            printf("\n    actual:  ");
+            for ( k = 0; k < n; ++k ) {
+                printf(" %02X", port.tx_bytes[k]);
+            }
+            printf("\n");
+        }
         CHECK(memcmp(port.tx_bytes, expected, (size_t)n) == 0);
     }
+}
+
+static void expect_adu(const uint8_t* pdu,
+                       int pdu_len)
+{
+    expect_adu_at((uint8_t)SLAVE_ADDR, pdu, pdu_len);
 }
 
 static void expect_exception(uint8_t function,
@@ -714,23 +751,54 @@ static void test_tx_timeout(void)
     CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
 }
 
-static void test_apply_config(void)
+static void test_address_callback(void)
 {
-    const uint8_t req[] = { 0x03U, 0x00U, 0x00U, 0x00U, 0x01U };
+    const uint8_t wr[]     = { 0x06U, 0x00U, 0x07U, 0x00U, 0x02U };
+    const uint8_t rd[]     = { 0x03U, 0x00U, 0x00U, 0x00U, 0x01U };
+    const uint8_t rd_pdu[] = { 0x03U, 0x02U, 0x00U, 0x00U };
 
     setup();
-    feed(SLAVE_ADDR, req, (int)sizeof req);
-    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
-
-    modbus_slave_set_address_pending(&slave, 9U);
-    CHECK(modbus_slave_apply_config(&slave) == MODBUS_SLAVE_ERR_STATE);
     CHECK(modbus_slave_get_address(&slave) == SLAVE_ADDR);
 
+    /* A write to the address register is answered by the address the master
+     * used; the new address applies from the next frame on. */
+    feed(SLAVE_ADDR, wr, (int)sizeof wr);
+    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
     finish_tx();
-    CHECK(modbus_slave_apply_config(&slave) == MODBUS_SLAVE_OK);
-    CHECK(modbus_slave_get_address(&slave) == 9U);
-    CHECK(port.timer_armed == 1U);
-    CHECK(port.timer_us == T35_US);
+    expect_adu(wr, (int)sizeof wr);
+    CHECK(modbus_slave_get_address(&slave) == 2U);
+    clear_tx();
+
+    /* The old address is no longer ours: dropped, no callback, no reply. */
+    feed(SLAVE_ADDR, rd, (int)sizeof rd);
+    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_HANDLED);
+    CHECK(port.tx_len == 0);
+    CHECK(store.calls == 1);
+
+    /* The new address answers. */
+    feed(2U, rd, (int)sizeof rd);
+    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
+    finish_tx();
+    expect_adu_at(2U, rd_pdu, (int)sizeof rd_pdu);
+    CHECK(store.calls == 2);
+    clear_tx();
+
+    /* The DIP offset is added on top, with no apply step. */
+    store.address_offset = 1U;
+    CHECK(modbus_slave_get_address(&slave) == 3U);
+    feed(3U, rd, (int)sizeof rd);
+    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_SENDING);
+    finish_tx();
+    expect_adu_at(3U, rd_pdu, (int)sizeof rd_pdu);
+    clear_tx();
+
+    /* An out-of-range address silences the slave, even for the broadcast
+     * address. */
+    store.holding[7]     = 0U;
+    store.address_offset = 0U;
+    feed(0U, wr, (int)sizeof wr);
+    CHECK(modbus_slave_advance(&slave) == MODBUS_SLAVE_STEP_HANDLED);
+    CHECK(port.tx_len == 0);
 }
 
 static void test_start_mid_tx(void)
@@ -866,7 +934,7 @@ int main(void)
     test_bad_quantity();
     test_out_of_range();
     test_tx_timeout();
-    test_apply_config();
+    test_address_callback();
     test_start_mid_tx();
     test_request_shapes();
 

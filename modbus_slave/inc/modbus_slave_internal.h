@@ -131,7 +131,7 @@ enum modbus_slave_session {
     MODBUS_SLAVE_SESSION_DISCARDING,     /**< Reception on, bytes dropped, waiting out a T3.5. */
     MODBUS_SLAVE_SESSION_IDLE,           /**< Reception on, ready for the first byte. */
     MODBUS_SLAVE_SESSION_RECEIVING,      /**< Reception on, collecting frame bytes. */
-    MODBUS_SLAVE_SESSION_WAITING,        /**< Frame frozen; the backend owns it. */
+    MODBUS_SLAVE_SESSION_CAPTURED,       /**< Frame frozen; it is the application's turn. */
     MODBUS_SLAVE_SESSION_SENDING         /**< Reply on the wire; the watchdog is armed. */
 };
 
@@ -154,7 +154,7 @@ void modbus_slave_rtu_resync(modbus_slave_t* me);
 /** TXE machine: emit the next byte or tolerate the trailing empty interrupt. */
 void modbus_slave_rtu_tx_ready(modbus_slave_t* me);
 
-/** TC machine: close TX, reopen RX, notify the backend. */
+/** TC machine: close TX, reopen RX, notify the event port. */
 void modbus_slave_rtu_tx_complete(modbus_slave_t* me);
 
 /** Arm the TX watchdog and switch the port to transmit. */
@@ -202,13 +202,13 @@ void modbus_slave_pdu_execute(modbus_slave_t* me,
                               const modbus_slave_request_t* req,
                               modbus_slave_response_t* rep);
 
-/** Report a complete frame to the backend (from the T3.5 interrupt). */
+/** Report a complete frame to the application (from the T3.5 interrupt). */
 void modbus_slave_notify_frame_received(modbus_slave_t* me);
 
-/** Report a completed transmission to the backend (from the TC interrupt). */
+/** Report a completed transmission to the application (from the TC interrupt). */
 void modbus_slave_notify_frame_sent(modbus_slave_t* me);
 
-/** Report a TX timeout to the backend (from the timer interrupt). */
+/** Report a TX timeout to the application (from the timer interrupt). */
 void modbus_slave_notify_tx_timeout(modbus_slave_t* me);
 
 #endif

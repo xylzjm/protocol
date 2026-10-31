@@ -103,16 +103,11 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
     me->event_port.on_frame_sent     = NULL;
     me->event_port.on_tx_timeout     = NULL;
 
-    me->rx_state   = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
-    me->tx_state   = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
-    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
 
-    me->rx_pos       = 0U;
-    me->response_len = 0U;
-    me->tx_len       = 0U;
-    me->tx_pos       = 0U;
-
-    me->started = 0U;
+    me->rx_pos = 0U;
+    me->tx_len = 0U;
+    me->tx_pos = 0U;
 
     return MODBUS_SLAVE_OK;
 }
@@ -126,7 +121,7 @@ modbus_slave_status_t modbus_slave_set_event_port(
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->started != 0U ) {
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 
@@ -151,7 +146,7 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING ) {
         /* A response is on the wire; start() must not switch reception on
          * under it. Tear the transmission down with stop() first. */
         return MODBUS_SLAVE_ERR_STATE;
@@ -159,15 +154,11 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 
     token = me->port.critical_enter(me->port.ctx);
 
-    if ( me->started == 0U ) {
-        me->started  = 1U;
-        me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
-        me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
-        me->rx_pos   = 0U;
-
-        /* Set the mode before touching the timer: an expiry that lands
-         * immediately must already find the matching mode. */
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
+        /* Enter DISCARDING before touching the port: the timeout may land
+         * immediately, and it must find the matching state. */
+        me->session = (uint8_t)MODBUS_SLAVE_SESSION_DISCARDING;
+        me->rx_pos  = 0U;
 
         /* Open reception and wait out one T3.5 of bus idle, so a frame that
          * was already in flight cannot be mistaken for a complete one. */
@@ -182,13 +173,12 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 
         if ( failed != 0U ) {
             /* Roll the half-started instance back so a retry starts clean. */
-            me->started    = 0U;
-            me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
+            me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
             (void)me->port.timer_disable(me->port.ctx);
             (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
         }
-    } else if ( me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_INIT
-                || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE ) {
+    } else if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_DISCARDING
+                || me->session == (uint8_t)MODBUS_SLAVE_SESSION_IDLE ) {
         /* Idempotent re-entry (e.g. the backend's IDLE entry): make sure
          * reception is on without disturbing a frame in collection. */
         if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
@@ -212,11 +202,8 @@ modbus_slave_status_t modbus_slave_stop(modbus_slave_t* me)
 
     token = me->port.critical_enter(me->port.ctx);
 
-    me->started    = 0U;
-    me->rx_state   = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
-    me->tx_state   = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
-    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
-    me->rx_pos     = 0U;
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
+    me->rx_pos  = 0U;
 
     if ( me->port.timer_disable(me->port.ctx) != MODBUS_SLAVE_OK ) {
         failed = 1U;
@@ -237,7 +224,7 @@ modbus_slave_status_t modbus_slave_rx_byte(modbus_slave_t* me,
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->started == 0U ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 
@@ -250,7 +237,7 @@ modbus_slave_status_t modbus_slave_timer_expired(modbus_slave_t* me)
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->started == 0U ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 
@@ -263,7 +250,7 @@ modbus_slave_status_t modbus_slave_tx_ready(modbus_slave_t* me)
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->started == 0U ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 
@@ -276,7 +263,7 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me)
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
-    if ( me->started == 0U ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         return MODBUS_SLAVE_ERR_STATE;
     }
 
@@ -288,34 +275,35 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me)
 
 static void reopen_rx(modbus_slave_t* me)
 {
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_IDLE;
     (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
 }
 
 modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
 {
-    modbus_slave_request_t   req = { 0U };
-    modbus_slave_response_t  rep = { 0U };
+    modbus_slave_request_t req  = {0U};
+    modbus_slave_response_t rep = {0U};
     modbus_slave_exception_t exception;
     enum modbus_slave_capture capture;
+    uint16_t pdu_length;
 
-    if ( me == NULL || me->started == 0U ) {
+    if ( me == NULL ) {
         return MODBUS_SLAVE_STEP_NONE;
     }
-    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING ) {
         /* A response is on the wire: the TX path owns the reception window
          * and releases it at TC or on the watchdog. A frame event arriving
          * now is stale; leave everything as it is. */
         return MODBUS_SLAVE_STEP_SENDING;
     }
-    if ( me->rx_state != (uint8_t)MODBUS_SLAVE_RX_STATE_WAIT_PROCESS ) {
-        /* No frozen window is held by anyone (stray event). */
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_WAITING ) {
+        /* No frozen window is held by anyone (stray event, or stopped). */
         return MODBUS_SLAVE_STEP_NONE;
     }
 
-    /* WAIT_PROCESS is over: this transaction owns the frozen window from here
-     * on, and every exit below either re-opens it or hands it to the TX path. */
-    me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
-
+    /* The frame is frozen and reception is off; this transaction owns the
+     * window from here on, and every exit below either re-opens it or hands
+     * it to the TX path. */
     capture = modbus_slave_adu_capture(me, &req);
     if ( capture == MODBUS_SLAVE_CAPTURE_IGNORE ) {
         reopen_rx(me);
@@ -346,8 +334,8 @@ modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)
     /* Wrap the reply in an ADU, arm the watchdog and start transmitting.
      * Reception stays frozen -- the request buffer must not change under the
      * transmitter -- and the TX path releases it at TC or on the watchdog. */
-    modbus_slave_adu_finish(me, &rep);
-    modbus_slave_adu_transmit(me, &req);
+    pdu_length = modbus_slave_adu_finish(me, &rep);
+    modbus_slave_adu_transmit(me, &req, pdu_length);
     return MODBUS_SLAVE_STEP_SENDING;
 }
 
@@ -377,33 +365,27 @@ modbus_slave_status_t modbus_slave_apply_config(modbus_slave_t* me)
 
     token = me->port.critical_enter(me->port.ctx);
 
-    if ( me->started != 0U
-         && me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING ) {
         /* A response owns the window: swapping the address now would corrupt
          * it. Keep the pending address for a later call. */
         me->port.critical_exit(me->port.ctx, token);
         return MODBUS_SLAVE_ERR_STATE;
     }
 
-    if ( me->started != 0U ) {
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         /* Mute reception and disarm the frame timer, so the next request
          * cannot merge with bytes of the frame this swap interrupts. */
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
         (void)me->port.timer_disable(me->port.ctx);
         (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
-        me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
-        me->rx_pos   = 0U;
     }
 
     me->address         = me->pending_address;
     me->address_pending = 0U;
 
-    if ( me->started != 0U ) {
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         /* Re-open reception and wait out one T3.5 of bus idle, exactly like
          * start(), so the first request after the swap is framed cleanly. */
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
-        (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
-        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+        modbus_slave_rtu_resync(me);
     }
 
     me->port.critical_exit(me->port.ctx, token);

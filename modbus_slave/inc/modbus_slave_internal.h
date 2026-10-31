@@ -122,29 +122,17 @@ typedef struct {
     uint8_t  exception;  /**< Non-zero: exception reply. */
 } modbus_slave_response_t;
 
-/* RX frame machine states ------------------------------------------------- */
+/* Session ----------------------------------------------------------------- */
 
-enum modbus_slave_rx_state {
-    MODBUS_SLAVE_RX_STATE_INIT         = 0, /**< Waiting for the first bus-idle window. */
-    MODBUS_SLAVE_RX_STATE_IDLE         = 1, /**< Ready for the first byte of a frame. */
-    MODBUS_SLAVE_RX_STATE_RCV          = 2, /**< Collecting frame bytes. */
-    MODBUS_SLAVE_RX_STATE_WAIT_PROCESS = 3, /**< Frame complete, reception off, notify. */
-    MODBUS_SLAVE_RX_STATE_ERROR        = 4  /**< Overlong frame; discard until bus idle. */
-};
-
-/* TX frame machine states ------------------------------------------------- */
-
-enum modbus_slave_tx_state {
-    MODBUS_SLAVE_TX_STATE_IDLE = 0,
-    MODBUS_SLAVE_TX_STATE_XMIT = 1
-};
-
-/* Timer modes ------------------------------------------------------------- */
-
-enum modbus_slave_timer_mode {
-    MODBUS_SLAVE_TIMER_NONE       = 0,
-    MODBUS_SLAVE_TIMER_RX_T35     = 1,
-    MODBUS_SLAVE_TIMER_TX_TIMEOUT = 2
+/** The one state the core is in. It implies what reception is doing and what
+ *  the one-shot timer means, so the two can never disagree. */
+enum modbus_slave_session {
+    MODBUS_SLAVE_SESSION_STOPPED    = 0, /**< Out of service; reception off. */
+    MODBUS_SLAVE_SESSION_DISCARDING,     /**< Reception on, bytes dropped, waiting out a T3.5. */
+    MODBUS_SLAVE_SESSION_IDLE,           /**< Reception on, ready for the first byte. */
+    MODBUS_SLAVE_SESSION_RECEIVING,      /**< Reception on, collecting frame bytes. */
+    MODBUS_SLAVE_SESSION_WAITING,        /**< Frame frozen; the backend owns it. */
+    MODBUS_SLAVE_SESSION_SENDING         /**< Reply on the wire; the watchdog is armed. */
 };
 
 /* Cross-module glue ------------------------------------------------------- */
@@ -159,6 +147,9 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
 
 /** Timer expiry machine: T3.5 end-of-frame or TX timeout. */
 void modbus_slave_rtu_timer_expired(modbus_slave_t* me);
+
+/** Enter DISCARDING: open reception and wait out a T3.5 of bus idle. */
+void modbus_slave_rtu_resync(modbus_slave_t* me);
 
 /** TXE machine: emit the next byte or tolerate the trailing empty interrupt. */
 void modbus_slave_rtu_tx_ready(modbus_slave_t* me);
@@ -197,13 +188,14 @@ void modbus_slave_adu_exception(modbus_slave_response_t* rep,
                                 uint8_t function,
                                 modbus_slave_exception_t exception);
 
-/** Encode the reply into tx_buffer[1..] and set response_len. */
-void modbus_slave_adu_finish(modbus_slave_t* me,
-                             const modbus_slave_response_t* rep);
+/** Encode the reply into tx_buffer[1..] and return the reply PDU length. */
+uint16_t modbus_slave_adu_finish(modbus_slave_t* me,
+                                 const modbus_slave_response_t* rep);
 
 /** Prepend the address, append the CRC and hand the ADU to the TX machine. */
 void modbus_slave_adu_transmit(modbus_slave_t* me,
-                               const modbus_slave_request_t* req);
+                               const modbus_slave_request_t* req,
+                               uint16_t pdu_length);
 
 /** Execute the decoded request into the reply. */
 void modbus_slave_pdu_execute(modbus_slave_t* me,

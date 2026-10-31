@@ -18,7 +18,7 @@ and commit messages use the same words as the code.
   switched off. The core opens and closes it; no backend touches it.
 - **Resynchronization** — waiting one complete T3.5 of bus silence before
   accepting a byte as the start of a frame. Used at start-up, after an
-  overlong frame, and after an aborted transmission.
+  overlong frame, after an aborted transmission, and around a reconfiguration.
 - **Backend** (`backend/qp`, planned `bare`/`freertos`) — the module that
   drives the core: it receives frame events and calls `advance()`.
 - **Hardware port** (`modbus_slave_port_t`) — the board's capabilities:

@@ -244,16 +244,11 @@ typedef struct modbus_slave {
     modbus_slave_event_port_t event_port;
 
     /* ---- runtime state (private) ---- */
-    uint8_t rx_state;   /**< modbus_slave_rx_state_t. */
-    uint8_t tx_state;   /**< modbus_slave_tx_state_t. */
-    uint8_t timer_mode; /**< modbus_slave_timer_mode_t. */
+    uint8_t session; /**< modbus_slave_session_t: what the core is doing. */
 
-    uint16_t rx_pos;       /**< Bytes of the current ADU in rx_buffer. */
-    uint16_t response_len; /**< Built response PDU length; 0 when none is pending. */
-    uint16_t tx_len;       /**< ADU length being transmitted. */
-    uint16_t tx_pos;       /**< Index of the next byte to transmit. */
-
-    uint8_t started;         /**< modbus_slave_start() has run. */
+    uint16_t rx_pos; /**< Bytes of the current ADU in rx_buffer. */
+    uint16_t tx_len; /**< ADU length being transmitted. */
+    uint16_t tx_pos; /**< Index of the next byte to transmit. */
 } modbus_slave_t;
 
 /* API --------------------------------------------------------------------- */
@@ -308,8 +303,8 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me);
 /**
  * @brief Stop the slave: close serial and timer, reset the machines.
  *
- * The RX machine returns to its initial state, so a later start()
- * resynchronizes on bus idle again.
+ * The core returns to `STOPPED`, so a later start() resynchronizes on bus
+ * idle again.
  *
  * Returns MODBUS_SLAVE_ERR_IO when the port failed to stop the timer or the
  * serial port; the software state is reset either way, so the caller may

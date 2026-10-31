@@ -149,17 +149,26 @@ plus a shared `ctx`:
   released, reception resynchronized on a fresh T3.5 — and then reports
   `on_tx_timeout`, which is informational: the line is already free.
 
-## Core RX frame machine
+## Core session
 
-```
-INIT ──T3.5──► IDLE ──first byte──► RCV ──each byte──► RCV (reload T3.5)
-                  ▲                  │
-                  │        T3.5 ─────┴──► WAIT_PROCESS (RX off, on_frame_received)
-                  │      >256 bytes ──► ERROR ──T3.5──► IDLE (RX on)
-                  └──── advance() ◄── WAIT_PROCESS
-```
+The core is in exactly one of six states. The state implies what reception is
+doing and what the one-shot timer means, so the two cannot disagree:
 
-RX is switched off in `WAIT_PROCESS` so the next request cannot overwrite a
+| State | Reception | Timer | Leaves to |
+|---|---|---|---|
+| `STOPPED` | off | — | `start()` → `DISCARDING` |
+| `DISCARDING` | on, bytes dropped | T3.5 gap | T3.5 → `IDLE` |
+| `IDLE` | on | — | first byte → `RECEIVING` |
+| `RECEIVING` | on | T3.5 gap | T3.5 → `WAITING`; overlong frame → `DISCARDING` |
+| `WAITING` | off (frozen) | — | `advance()` → `IDLE` or `SENDING` |
+| `SENDING` | off | TX watchdog | TC → `IDLE`; watchdog → `DISCARDING` |
+
+`DISCARDING` is the resynchronization state: the core enters it at start,
+after an overlong frame, after an aborted transmission and around a
+reconfiguration. Reception stays on while the bytes are dropped, and the gap
+after the last one is what makes the next frame's edge trustworthy.
+
+RX is switched off in `WAITING` so the next request cannot overwrite a
 frame the backend is still processing. The **reception window belongs to the
 core**, and `modbus_slave_advance()` is the only operation that closes a
 transaction: it re-opens reception for an ignored frame, a broadcast or a

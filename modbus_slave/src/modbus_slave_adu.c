@@ -10,33 +10,32 @@
 /* Request shapes ---------------------------------------------------------- */
 
 typedef struct {
-    uint8_t  function;     /**< Wire function code. */
-    uint8_t  kind;         /**< enum modbus_slave_request_kind. */
-    uint8_t  pdu_length;   /**< Exact PDU length; 0 = variable. */
+    uint8_t function;      /**< Wire function code. */
+    uint8_t kind;          /**< enum modbus_slave_request_kind. */
+    uint8_t pdu_length;    /**< Exact PDU length; 0 = variable. */
     uint16_t quantity_max; /**< 0 = the PDU carries no quantity. */
-    uint8_t  units;        /**< 1 = bits, 2 = registers. */
+    uint8_t units;         /**< 1 = bits, 2 = registers. */
 } shape_t;
 
 static const shape_t shapes[] = {
-    { MODBUS_SLAVE_FC_READ_COILS,             MODBUS_SLAVE_REQ_READ_BITS,
-      5U, MODBUS_SLAVE_BITS_READ_MAX,  1U },
-    { MODBUS_SLAVE_FC_READ_DISCRETE_INPUTS,   MODBUS_SLAVE_REQ_READ_BITS,
-      5U, MODBUS_SLAVE_BITS_READ_MAX,  1U },
-    { MODBUS_SLAVE_FC_READ_HOLDING_REGISTERS, MODBUS_SLAVE_REQ_READ_REGS,
-      5U, MODBUS_SLAVE_REGS_READ_MAX,  2U },
-    { MODBUS_SLAVE_FC_READ_INPUT_REGISTERS,   MODBUS_SLAVE_REQ_READ_REGS,
-      5U, MODBUS_SLAVE_REGS_READ_MAX,  2U },
-    { MODBUS_SLAVE_FC_WRITE_SINGLE_COIL,      MODBUS_SLAVE_REQ_WRITE_SINGLE_COIL,
-      5U, 1U,                          0U },
-    { MODBUS_SLAVE_FC_WRITE_SINGLE_REGISTER,  MODBUS_SLAVE_REQ_WRITE_SINGLE_REG,
-      5U, 1U,                          0U },
-    { MODBUS_SLAVE_FC_WRITE_MULTIPLE_COILS,   MODBUS_SLAVE_REQ_WRITE_BITS,
-      0U, MODBUS_SLAVE_BITS_WRITE_MAX, 1U },
-    { MODBUS_SLAVE_FC_WRITE_MULTIPLE_REGS,    MODBUS_SLAVE_REQ_WRITE_REGS,
-      0U, MODBUS_SLAVE_REGS_WRITE_MAX, 2U },
-    { MODBUS_SLAVE_FC_REPORT_SLAVE_ID,        MODBUS_SLAVE_REQ_REPORT_ID,
-      1U, 0U,                          0U }
-};
+    {MODBUS_SLAVE_FC_READ_COILS, MODBUS_SLAVE_REQ_READ_BITS,
+     5U, MODBUS_SLAVE_BITS_READ_MAX, 1U},
+    {MODBUS_SLAVE_FC_READ_DISCRETE_INPUTS, MODBUS_SLAVE_REQ_READ_BITS,
+     5U, MODBUS_SLAVE_BITS_READ_MAX, 1U},
+    {MODBUS_SLAVE_FC_READ_HOLDING_REGISTERS, MODBUS_SLAVE_REQ_READ_REGS,
+     5U, MODBUS_SLAVE_REGS_READ_MAX, 2U},
+    {MODBUS_SLAVE_FC_READ_INPUT_REGISTERS, MODBUS_SLAVE_REQ_READ_REGS,
+     5U, MODBUS_SLAVE_REGS_READ_MAX, 2U},
+    {MODBUS_SLAVE_FC_WRITE_SINGLE_COIL, MODBUS_SLAVE_REQ_WRITE_SINGLE_COIL,
+     5U, 1U, 0U},
+    {MODBUS_SLAVE_FC_WRITE_SINGLE_REGISTER, MODBUS_SLAVE_REQ_WRITE_SINGLE_REG,
+     5U, 1U, 0U},
+    {MODBUS_SLAVE_FC_WRITE_MULTIPLE_COILS, MODBUS_SLAVE_REQ_WRITE_BITS,
+     0U, MODBUS_SLAVE_BITS_WRITE_MAX, 1U},
+    {MODBUS_SLAVE_FC_WRITE_MULTIPLE_REGS, MODBUS_SLAVE_REQ_WRITE_REGS,
+     0U, MODBUS_SLAVE_REGS_WRITE_MAX, 2U},
+    {MODBUS_SLAVE_FC_REPORT_SLAVE_ID, MODBUS_SLAVE_REQ_REPORT_ID,
+     1U, 0U, 0U}};
 
 static const shape_t* find_shape(uint8_t function)
 {
@@ -57,7 +56,7 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
 {
     uint16_t frame_len = me->rx_pos;
     uint16_t crc;
-    uint8_t  address;
+    uint8_t address;
 
     if ( frame_len < (uint16_t)MODBUS_SLAVE_ADU_SIZE_MIN ) {
         return MODBUS_SLAVE_CAPTURE_IGNORE;
@@ -101,9 +100,9 @@ enum modbus_slave_capture modbus_slave_adu_capture(modbus_slave_t* me,
 modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
                                                  modbus_slave_request_t* req)
 {
-    uint8_t*       pdu   = &me->rx_buffer[MODBUS_SLAVE_ADU_PDU_OFFSET];
+    uint8_t* pdu         = &me->rx_buffer[MODBUS_SLAVE_ADU_PDU_OFFSET];
     const shape_t* shape = find_shape(req->function);
-    uint16_t       expected;
+    uint16_t expected;
 
     if ( shape == NULL ) {
         return MODBUS_SLAVE_EX_ILLEGAL_FUNCTION;
@@ -137,7 +136,7 @@ modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
         case MODBUS_SLAVE_REQ_WRITE_SINGLE_COIL: {
             uint16_t value;
 
-            req->start    = modbus_slave_get_u16(
+            req->start = modbus_slave_get_u16(
                 &pdu[MODBUS_SLAVE_PDU_START_OFFSET]);
             req->quantity = 1U;
             value         = modbus_slave_get_u16(
@@ -150,7 +149,7 @@ modbus_slave_exception_t modbus_slave_adu_decode(modbus_slave_t* me,
         }
 
         case MODBUS_SLAVE_REQ_WRITE_SINGLE_REG:
-            req->start       = modbus_slave_get_u16(
+            req->start = modbus_slave_get_u16(
                 &pdu[MODBUS_SLAVE_PDU_START_OFFSET]);
             req->quantity    = 1U;
             req->data        = &pdu[MODBUS_SLAVE_PDU_QUANTITY_OFFSET];
@@ -217,43 +216,47 @@ void modbus_slave_adu_exception(modbus_slave_response_t* rep,
     rep->exception = (uint8_t)exception;
 }
 
-void modbus_slave_adu_finish(modbus_slave_t* me,
-                             const modbus_slave_response_t* rep)
+uint16_t modbus_slave_adu_finish(modbus_slave_t* me,
+                                 const modbus_slave_response_t* rep)
 {
+    uint16_t length;
     uint16_t index;
 
     if ( rep->exception != 0U ) {
         me->tx_buffer[1] = (uint8_t)(rep->function | MODBUS_SLAVE_FC_ERROR_MASK);
         me->tx_buffer[2] = rep->exception;
-        me->response_len = 2U;
+        length           = 2U;
     } else if ( rep->echo != 0U ) {
         /* The write replies are the first five request PDU bytes: function,
          * address and value/quantity. */
         for ( index = 1U; index < 6U; ++index ) {
             me->tx_buffer[index] = me->rx_buffer[index];
         }
-        me->response_len = 5U;
+        length = 5U;
     } else {
         me->tx_buffer[1] = rep->function;
         me->tx_buffer[2] = (uint8_t)rep->byte_count;
-        me->response_len = (uint16_t)(2U + rep->byte_count);
+        length           = (uint16_t)(2U + rep->byte_count);
     }
+
+    return length;
 }
 
 void modbus_slave_adu_transmit(modbus_slave_t* me,
-                               const modbus_slave_request_t* req)
+                               const modbus_slave_request_t* req,
+                               uint16_t pdu_length)
 {
     uint16_t crc;
 
-    me->tx_buffer[0] = req->address;
-    crc = modbus_slave_crc(me->tx_buffer, (uint16_t)(me->response_len + 1U));
-    me->tx_buffer[1U + me->response_len] = (uint8_t)(crc & 0xFFU);
-    me->tx_buffer[2U + me->response_len] = (uint8_t)(crc >> 8);
+    me->tx_buffer[0]               = req->address;
+    crc                            = modbus_slave_crc(
+        me->tx_buffer, (uint16_t)(pdu_length + 1U));
+    me->tx_buffer[1U + pdu_length] = (uint8_t)(crc & 0xFFU);
+    me->tx_buffer[2U + pdu_length] = (uint8_t)(crc >> 8);
 
-    me->tx_len = (uint16_t)(1U + me->response_len
+    me->tx_len = (uint16_t)(1U + pdu_length
                             + (uint16_t)MODBUS_SLAVE_ADU_CRC_SIZE);
     me->tx_pos = 0U;
-    me->response_len = 0U; /* consumed: the TX machine owns the ADU now */
 
     modbus_slave_rtu_start_tx(me);
 }

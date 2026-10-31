@@ -2,64 +2,64 @@
 
 #include "modbus_slave_internal.h"
 
-/* RTU framing: RX/TX frame machines, the T3.5 inter-frame timer and the TX
- * watchdog. This module never touches the PDU: it only decides when a frame
- * is complete and drives the serial port through the board's port. */
+/* RTU framing: the receive and transmit machines, the T3.5 inter-frame timer
+ * and the TX watchdog. This module never touches the PDU: it only decides when
+ * a frame is complete and drives the serial port through the board's port.
+ * The session state says what reception is doing and what the timer means. */
 
-/* Release the line and resynchronize reception after an aborted response. */
-static void abort_tx(modbus_slave_t* me);
+/* Resynchronization ------------------------------------------------------- */
+
+void modbus_slave_rtu_resync(modbus_slave_t* me)
+{
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_DISCARDING;
+    me->rx_pos  = 0U;
+
+    /* Enter the state before touching the port: an expiry that lands
+     * immediately must already find it. Reception stays open while the bytes
+     * are dropped; the gap after the last one is what makes the edge of the
+     * next frame trustworthy. */
+    (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+    (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+}
 
 /* RX frame machine -------------------------------------------------------- */
 
 void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
                               uint8_t byte)
 {
-    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE ) {
-        /* A stray byte (late RXNE, DE switching glitch, or a port that did
-         * not fully mute the receiver) must neither start a frame nor
-         * replace the TX watchdog while a response is on the wire. */
-        return;
-    }
-
-    switch ( (enum modbus_slave_rx_state)me->rx_state ) {
-        case MODBUS_SLAVE_RX_STATE_INIT:
+    switch ( (enum modbus_slave_session)me->session ) {
+        case MODBUS_SLAVE_SESSION_DISCARDING:
             /* The bus has not been idle for T3.5 yet, so the frame edge is
              * unknown: discard the byte and keep waiting for a full gap. */
+            (void)me->port.timer_enable(me->port.ctx, me->t35_us);
             break;
 
-        case MODBUS_SLAVE_RX_STATE_IDLE:
+        case MODBUS_SLAVE_SESSION_IDLE:
             me->rx_buffer[0] = byte;
             me->rx_pos       = 1U;
-            me->rx_state     = (uint8_t)MODBUS_SLAVE_RX_STATE_RCV;
+            me->session      = (uint8_t)MODBUS_SLAVE_SESSION_RECEIVING;
+            (void)me->port.timer_enable(me->port.ctx, me->t35_us);
             break;
 
-        case MODBUS_SLAVE_RX_STATE_RCV:
+        case MODBUS_SLAVE_SESSION_RECEIVING:
             if ( me->rx_pos >= (uint16_t)MODBUS_SLAVE_ADU_SIZE_MAX ) {
                 /* Overlong: a legal RTU ADU never exceeds 256 bytes, so this
                  * is noise. Drop everything until the bus goes idle again. */
-                me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_ERROR;
+                modbus_slave_rtu_resync(me);
             } else {
                 me->rx_buffer[me->rx_pos] = byte;
                 me->rx_pos++;
+                (void)me->port.timer_enable(me->port.ctx, me->t35_us);
             }
             break;
 
-        case MODBUS_SLAVE_RX_STATE_WAIT_PROCESS:
-        case MODBUS_SLAVE_RX_STATE_ERROR:
+        case MODBUS_SLAVE_SESSION_STOPPED:
+        case MODBUS_SLAVE_SESSION_WAITING:
+        case MODBUS_SLAVE_SESSION_SENDING:
         default:
-            /* WAIT_PROCESS: reception is off, a stray byte must not disturb
-             * the captured frame. ERROR: keep discarding below. */
+            /* Reception is off or frozen: a stray byte must neither start a
+             * frame nor disturb a captured one. */
             break;
-    }
-
-    /* (Re)arm T3.5 while bytes keep arriving; the gap after the last byte
-     * ends the frame (RCV), the startup synchronization (INIT), or the
-     * overflow discard window (ERROR). */
-    if ( me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_INIT
-         || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_RCV
-         || me->rx_state == (uint8_t)MODBUS_SLAVE_RX_STATE_ERROR ) {
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
-        (void)me->port.timer_enable(me->port.ctx, me->t35_us);
     }
 }
 
@@ -67,46 +67,35 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
 
 void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
 {
-    uint8_t mode = me->timer_mode;
+    switch ( (enum modbus_slave_session)me->session ) {
+        case MODBUS_SLAVE_SESSION_DISCARDING:
+            /* One T3.5 of silence: the frame edges are trustworthy now. */
+            me->session = (uint8_t)MODBUS_SLAVE_SESSION_IDLE;
+            break;
 
-    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
+        case MODBUS_SLAVE_SESSION_RECEIVING:
+            /* End of frame: freeze reception so the next request cannot
+             * overwrite this one while the backend processes it. */
+            me->session = (uint8_t)MODBUS_SLAVE_SESSION_WAITING;
+            (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
+            modbus_slave_notify_frame_received(me);
+            break;
 
-    if ( mode == (uint8_t)MODBUS_SLAVE_TIMER_RX_T35 ) {
-        switch ( (enum modbus_slave_rx_state)me->rx_state ) {
-            case MODBUS_SLAVE_RX_STATE_INIT:
-                /* One T3.5 of silence: the frame edges are trustworthy now. */
-                me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
-                break;
-
-            case MODBUS_SLAVE_RX_STATE_RCV:
-                /* End of frame: freeze reception so the next request cannot
-                 * overwrite this one while the backend processes it. */
-                me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_WAIT_PROCESS;
-                (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
-                modbus_slave_notify_frame_received(me);
-                break;
-
-            case MODBUS_SLAVE_RX_STATE_ERROR:
-                /* The overlong frame has ended; start listening again. */
-                me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_IDLE;
-                (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
-                break;
-
-            default:
-                /* IDLE/WAIT_PROCESS: nothing armed this timer here. */
-                break;
-        }
-    } else if ( mode == (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT ) {
-        if ( me->tx_state == (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT ) {
+        case MODBUS_SLAVE_SESSION_SENDING:
             /* The response will never drain. Release the line here, in the
              * interrupt: a shared RS485 segment stays blocked while DE is
              * asserted, so recovery must not depend on when the backend's
              * active object gets to run. */
-            abort_tx(me);
+            modbus_slave_rtu_resync(me);
             modbus_slave_notify_tx_timeout(me);
-        }
-    } else {
-        /* Spurious expiry with no timer armed. */
+            break;
+
+        case MODBUS_SLAVE_SESSION_STOPPED:
+        case MODBUS_SLAVE_SESSION_IDLE:
+        case MODBUS_SLAVE_SESSION_WAITING:
+        default:
+            /* No timer is armed in these states; a spurious expiry is a no-op. */
+            break;
     }
 }
 
@@ -114,7 +103,7 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
 
 void modbus_slave_rtu_tx_ready(modbus_slave_t* me)
 {
-    if ( me->tx_state == (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT
+    if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING
          && me->tx_pos < me->tx_len ) {
         (void)me->port.put_byte(me->port.ctx, me->tx_buffer[me->tx_pos]);
         me->tx_pos++;
@@ -128,22 +117,20 @@ void modbus_slave_rtu_tx_ready(modbus_slave_t* me)
         }
     } else {
         /* Nothing left to send: a stray TXE, or the TX watchdog already
-         * moved the machine to IDLE. Mute TXE here as well. */
+         * moved the machine out of SENDING. Mute TXE here as well. */
         (void)me->port.tx_done(me->port.ctx);
     }
 }
 
 void modbus_slave_rtu_tx_complete(modbus_slave_t* me)
 {
-    if ( me->tx_state != (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT ) {
+    if ( me->session != (uint8_t)MODBUS_SLAVE_SESSION_SENDING ) {
         return;
     }
-    me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
 
-    if ( me->timer_mode == (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT ) {
-        (void)me->port.timer_disable(me->port.ctx);
-        me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_NONE;
-    }
+    /* Disarm the watchdog first: the frame is over, whatever it was doing. */
+    (void)me->port.timer_disable(me->port.ctx);
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_IDLE;
 
     /* TC is the last bit leaving the shift register, so DE may be released
      * and reception reopened right here. */
@@ -162,32 +149,12 @@ void modbus_slave_rtu_start_tx(modbus_slave_t* me)
                                / me->baudrate)
                     + 10000U;
 
-    /* Arm the watchdog before enabling TX so no byte can go out unprotected.
-     * Set its mode first: an expiry that lands immediately must find it. */
-    me->tx_state   = (uint8_t)MODBUS_SLAVE_TX_STATE_XMIT;
-    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_TX_TIMEOUT;
+    /* Enter SENDING before arming the timer, so an expiry that lands
+     * immediately already finds the matching state. */
+    me->session = (uint8_t)MODBUS_SLAVE_SESSION_SENDING;
     (void)me->port.timer_enable(me->port.ctx, tx_timeout_us);
 
     /* RX off, DE on, TC cleared, TXE+TC interrupts enabled: the TXE
      * interrupt that follows delivers the first byte through tx_ready(). */
     (void)me->port.serial_enable(me->port.ctx, 0U, 1U);
-}
-
-static void abort_tx(modbus_slave_t* me)
-{
-    me->tx_state = (uint8_t)MODBUS_SLAVE_TX_STATE_IDLE;
-
-    /* Resynchronize: bytes of the truncated response may still be in flight,
-     * so the receiver must see a full T3.5 of idle before it accepts the next
-     * frame. The state changes before reception opens, so no byte can slip
-     * into a frame that is about to be discarded. */
-    me->rx_state = (uint8_t)MODBUS_SLAVE_RX_STATE_INIT;
-    me->rx_pos   = 0U;
-
-    /* Disable TXE and TC (a pending TC is cleared with it) and release DE, so
-     * the line is free for every slave again. */
-    (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
-
-    me->timer_mode = (uint8_t)MODBUS_SLAVE_TIMER_RX_T35;
-    (void)me->port.timer_enable(me->port.ctx, me->t35_us);
 }

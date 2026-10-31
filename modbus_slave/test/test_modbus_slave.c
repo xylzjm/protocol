@@ -41,6 +41,7 @@ typedef struct {
     uint8_t  rx_open;
     uint8_t  tx_open;
     uint8_t  de;
+    uint8_t  irq_enabled;
     uint8_t  timer_armed;
     uint32_t timer_us;
     uint32_t crit_depth;
@@ -57,9 +58,9 @@ typedef struct {
 
 static fake_t port;
 
-static modbus_slave_status_t fake_serial(void* ctx,
-                                         uint8_t rx,
-                                         uint8_t tx)
+static modbus_slave_status_t fake_direction(void* ctx,
+                                            uint8_t rx,
+                                            uint8_t tx)
 {
     fake_t* f = (fake_t*)ctx;
 
@@ -90,8 +91,8 @@ static modbus_slave_status_t fake_tx_done(void* ctx)
     return MODBUS_SLAVE_OK;
 }
 
-static modbus_slave_status_t fake_timer_enable(void* ctx,
-                                               uint32_t timeout_us)
+static modbus_slave_status_t fake_arm(void* ctx,
+                                      uint32_t timeout_us)
 {
     fake_t* f = (fake_t*)ctx;
 
@@ -101,7 +102,7 @@ static modbus_slave_status_t fake_timer_enable(void* ctx,
     return MODBUS_SLAVE_OK;
 }
 
-static modbus_slave_status_t fake_timer_disable(void* ctx)
+static modbus_slave_status_t fake_cancel(void* ctx)
 {
     fake_t* f = (fake_t*)ctx;
 
@@ -109,21 +110,24 @@ static modbus_slave_status_t fake_timer_disable(void* ctx)
     return MODBUS_SLAVE_OK;
 }
 
-static uint32_t fake_critical_enter(void* ctx)
+/* The nesting counter the port is required to keep: interrupts come back only
+ * when the outermost section exits. */
+static void fake_enter(void* ctx)
 {
     fake_t* f = (fake_t*)ctx;
 
+    f->irq_enabled = 0U;
     f->crit_depth++;
-    return 0U;
 }
 
-static void fake_critical_exit(void* ctx,
-                               uint32_t state)
+static void fake_exit(void* ctx)
 {
     fake_t* f = (fake_t*)ctx;
 
-    (void)state;
     f->crit_depth--;
+    if ( f->crit_depth == 0U ) {
+        f->irq_enabled = 1U;
+    }
 }
 
 static void fake_on_frame_received(void* ctx)
@@ -303,6 +307,7 @@ static int setup(void)
     }
 
     memset(&port, 0, sizeof port);
+    port.irq_enabled = 1U; /* interrupts start enabled */
     memset(&store, 0, sizeof store);
     memset(&slave, 0, sizeof slave);
     memset(&cfg, 0, sizeof cfg);
@@ -316,14 +321,18 @@ static int setup(void)
     cfg.tx_buffer   = tx_buffer;
     cfg.tx_capacity = (uint16_t)sizeof tx_buffer;
 
-    cfg.port.ctx            = &port;
-    cfg.port.serial_enable  = fake_serial;
-    cfg.port.put_byte       = fake_put_byte;
-    cfg.port.tx_done        = fake_tx_done;
-    cfg.port.timer_enable   = fake_timer_enable;
-    cfg.port.timer_disable  = fake_timer_disable;
-    cfg.port.critical_enter = fake_critical_enter;
-    cfg.port.critical_exit  = fake_critical_exit;
+    cfg.line.ctx       = &port;
+    cfg.line.direction = fake_direction;
+    cfg.line.put_byte  = fake_put_byte;
+    cfg.line.tx_done   = fake_tx_done;
+
+    cfg.timer.ctx  = &port;
+    cfg.timer.arm  = fake_arm;
+    cfg.timer.cancel = fake_cancel;
+
+    cfg.critical.ctx   = &port;
+    cfg.critical.enter = fake_enter;
+    cfg.critical.exit  = fake_exit;
 
     cfg.callbacks.ctx               = &store;
     cfg.callbacks.coils             = coils_cb;
@@ -914,6 +923,30 @@ static void test_request_shapes(void)
                 MODBUS_SLAVE_EX_ILLEGAL_DATA_VALUE);
 }
 
+static void test_nested_critical(void)
+{
+    setup();
+    CHECK(port.crit_depth == 0U);
+    CHECK(port.irq_enabled == 1U);
+
+    /* The application holds its own section across a core call: the core's
+     * exit must not re-enable interrupts. */
+    fake_enter(&port);
+    CHECK(port.irq_enabled == 0U);
+    CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_OK);
+    CHECK(port.crit_depth == 1U);
+    CHECK(port.irq_enabled == 0U);
+    fake_exit(&port);
+    CHECK(port.crit_depth == 0U);
+    CHECK(port.irq_enabled == 1U);
+
+    /* stop() balances its own pair. */
+    CHECK(modbus_slave_stop(&slave) == MODBUS_SLAVE_OK);
+    CHECK(port.crit_depth == 0U);
+    CHECK(port.irq_enabled == 1U);
+    CHECK(modbus_slave_start(&slave) == MODBUS_SLAVE_OK);
+}
+
 int main(void)
 {
     test_start();
@@ -936,6 +969,7 @@ int main(void)
     test_tx_timeout();
     test_address_callback();
     test_start_mid_tx();
+    test_nested_critical();
     test_request_shapes();
 
     printf("%d checks, %d failures\n", checks, failures);

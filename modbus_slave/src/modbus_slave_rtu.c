@@ -4,7 +4,7 @@
 
 /* RTU framing: the receive and transmit machines, the T3.5 inter-frame timer
  * and the TX watchdog. This module never touches the PDU: it only decides when
- * a frame is complete and drives the serial port through the board's port.
+ * a frame is complete and drives the line capability.
  * The session state says what reception is doing and what the timer means. */
 
 /* Resynchronization ------------------------------------------------------- */
@@ -18,8 +18,8 @@ void modbus_slave_rtu_resync(modbus_slave_t* me)
      * immediately must already find it. Reception stays open while the bytes
      * are dropped; the gap after the last one is what makes the edge of the
      * next frame trustworthy. */
-    (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
-    (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+    (void)me->line.direction(me->line.ctx, 1U, 0U);
+    (void)me->timer.arm(me->timer.ctx, me->t35_us);
 }
 
 /* RX frame machine -------------------------------------------------------- */
@@ -31,14 +31,14 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
         case MODBUS_SLAVE_SESSION_DISCARDING:
             /* The bus has not been idle for T3.5 yet, so the frame edge is
              * unknown: discard the byte and keep waiting for a full gap. */
-            (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+            (void)me->timer.arm(me->timer.ctx, me->t35_us);
             break;
 
         case MODBUS_SLAVE_SESSION_IDLE:
             me->rx_buffer[0] = byte;
             me->rx_pos       = 1U;
             me->session      = (uint8_t)MODBUS_SLAVE_SESSION_RECEIVING;
-            (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+            (void)me->timer.arm(me->timer.ctx, me->t35_us);
             break;
 
         case MODBUS_SLAVE_SESSION_RECEIVING:
@@ -49,7 +49,7 @@ void modbus_slave_rtu_rx_byte(modbus_slave_t* me,
             } else {
                 me->rx_buffer[me->rx_pos] = byte;
                 me->rx_pos++;
-                (void)me->port.timer_enable(me->port.ctx, me->t35_us);
+                (void)me->timer.arm(me->timer.ctx, me->t35_us);
             }
             break;
 
@@ -77,7 +77,7 @@ void modbus_slave_rtu_timer_expired(modbus_slave_t* me)
             /* End of frame: freeze reception so the next request cannot
              * overwrite this one while the application processes it. */
             me->session = (uint8_t)MODBUS_SLAVE_SESSION_CAPTURED;
-            (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
+            (void)me->line.direction(me->line.ctx, 0U, 0U);
             modbus_slave_notify_frame_received(me);
             break;
 
@@ -105,7 +105,7 @@ void modbus_slave_rtu_tx_ready(modbus_slave_t* me)
 {
     if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_SENDING
          && me->tx_pos < me->tx_len ) {
-        (void)me->port.put_byte(me->port.ctx, me->tx_buffer[me->tx_pos]);
+        (void)me->line.put_byte(me->line.ctx, me->tx_buffer[me->tx_pos]);
         me->tx_pos++;
 
         if ( me->tx_pos == me->tx_len ) {
@@ -113,12 +113,12 @@ void modbus_slave_rtu_tx_ready(modbus_slave_t* me)
              * needed. Mute it now: a level-triggered TXE would otherwise
              * keep interrupting until TC. TC stays enabled and closes the
              * frame (releasing DE only when the last bit is out). */
-            (void)me->port.tx_done(me->port.ctx);
+            (void)me->line.tx_done(me->line.ctx);
         }
     } else {
         /* Nothing left to send: a stray TXE, or the TX watchdog already
          * moved the machine out of SENDING. Mute TXE here as well. */
-        (void)me->port.tx_done(me->port.ctx);
+        (void)me->line.tx_done(me->line.ctx);
     }
 }
 
@@ -129,12 +129,12 @@ void modbus_slave_rtu_tx_complete(modbus_slave_t* me)
     }
 
     /* Disarm the watchdog first: the frame is over, whatever it was doing. */
-    (void)me->port.timer_disable(me->port.ctx);
+    (void)me->timer.cancel(me->timer.ctx);
     me->session = (uint8_t)MODBUS_SLAVE_SESSION_IDLE;
 
     /* TC is the last bit leaving the shift register, so DE may be released
      * and reception reopened right here. */
-    (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+    (void)me->line.direction(me->line.ctx, 1U, 0U);
     modbus_slave_notify_frame_sent(me);
 }
 
@@ -152,9 +152,9 @@ void modbus_slave_rtu_start_tx(modbus_slave_t* me)
     /* Enter SENDING before arming the timer, so an expiry that lands
      * immediately already finds the matching state. */
     me->session = (uint8_t)MODBUS_SLAVE_SESSION_SENDING;
-    (void)me->port.timer_enable(me->port.ctx, tx_timeout_us);
+    (void)me->timer.arm(me->timer.ctx, tx_timeout_us);
 
     /* RX off, DE on, TC cleared, TXE+TC interrupts enabled: the TXE
      * interrupt that follows delivers the first byte through tx_ready(). */
-    (void)me->port.serial_enable(me->port.ctx, 0U, 1U);
+    (void)me->line.direction(me->line.ctx, 0U, 1U);
 }

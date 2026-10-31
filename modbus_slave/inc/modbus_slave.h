@@ -13,9 +13,9 @@
  *
  * The core does not own hardware and does not schedule itself:
  *
- * - The board supplies hardware capabilities through modbus_slave_port_t
- *   (serial direction control, byte output, one-shot timer, critical
- *   sections), passed to modbus_slave_ctor().
+ * - The board supplies three capability structs to modbus_slave_ctor(): the
+ *   RS485 line (direction, byte output, end of stream), the one-shot timer,
+ *   and an interrupt mask that nests.
  * - The application drives the core: it receives frame events through
  *   modbus_slave_event_port_t and calls modbus_slave_advance() once per
  *   frame, in its own context. The transaction and the reception window
@@ -66,52 +66,69 @@ typedef enum {
     MODBUS_SLAVE_STEP_SENDING   /**< A response is on the wire; the TX path holds reception. */
 } modbus_slave_step_t;
 
-/* Hardware capability interface (board-provided) -------------------------- */
+/* Hardware capabilities (board-provided) ---------------------------------- */
 
 /**
- * @brief Hardware operations the core needs from the board.
+ * @brief The RS485 line: direction, one byte out, and the end of the stream.
  *
- * All seven operations are required: modbus_slave_ctor() rejects a port that
- * leaves any of them NULL.
+ * All three operations are required; modbus_slave_ctor() rejects a NULL.
  *
- * - serial_enable(rx, tx): rx=1 enables reception, releases the RS485
- *   driver-enable (DE), and disables the TXE and TC interrupts (clearing a
- *   pending TC), so a finished transmission cannot keep interrupting;
- *   tx=1 asserts DE, clears TC and enables the TXE+TC interrupts; (0,0)
- *   disables both directions and releases DE. Each call must leave the
- *   direction it does not select switched off.
- * - put_byte(byte): writes one byte to the UART data register, non-blocking,
+ * - direction(rx, tx) is the transceiver contract. rx=1: enable reception,
+ *   release the driver-enable (DE), disable the TXE and TC interrupts and
+ *   clear a pending TC, so a finished transmission cannot keep interrupting.
+ *   tx=1: assert DE, clear TC, enable the TXE+TC interrupts. (0,0): disable
+ *   both directions and release DE. Each call must leave the direction it
+ *   does not select switched off.
+ * - put_byte(byte): write one byte to the UART data register, non-blocking,
  *   called only from the TXE interrupt.
  * - tx_done(): called from the TXE interrupt once the core has loaded the
  *   last byte (or has nothing left to send). Stop requesting TXE; keep the
  *   TC interrupt enabled so the TC path can close the frame and release DE.
- *   This is the port's only chance to mute a level-triggered TXE interrupt.
- * - timer_enable(timeout_us): arms the one-shot inter-frame/TX timer; when it
- *   expires the board must call modbus_slave_timer_expired(). At low baud
- *   rates the timeout can reach several seconds, so the timer has to support
- *   long durations. The core also re-arms it from inside the expiry interrupt
- *   (it resynchronizes reception after an aborted transmission), so the board
- *   must clear the pending match before the timer is enabled again.
- * - timer_disable(): stops the timer and clears a pending expiry.
- * - critical_enter()/critical_exit(state): save and disable interrupts,
- *   restore the saved state. The token must nest correctly (PRIMASK/BASEPRI
- *   on QV/QK, portSET/portCLEAR_INTERRUPT_MASK_FROM_ISR on FreeRTOS).
+ *   This is the line's only chance to mute a level-triggered TXE interrupt.
  */
 typedef struct {
     void* ctx;
-    modbus_slave_status_t (*serial_enable)(void* ctx,
-                                           uint8_t rx,
-                                           uint8_t tx);
+    modbus_slave_status_t (*direction)(void* ctx,
+                                       uint8_t rx,
+                                       uint8_t tx);
     modbus_slave_status_t (*put_byte)(void* ctx,
                                       uint8_t byte);
     modbus_slave_status_t (*tx_done)(void* ctx);
-    modbus_slave_status_t (*timer_enable)(void* ctx,
-                                          uint32_t timeout_us);
-    modbus_slave_status_t (*timer_disable)(void* ctx);
-    uint32_t (*critical_enter)(void* ctx);
-    void (*critical_exit)(void* ctx,
-                          uint32_t state);
-} modbus_slave_port_t;
+} modbus_slave_line_t;
+
+/**
+ * @brief The one-shot timer behind T3.5 and the TX watchdog.
+ *
+ * - arm(timeout_us): start a one-shot; when it expires the board must call
+ *   modbus_slave_timer_expired(). At low baud rates the timeout can reach
+ *   seconds, so it has to support long durations. The core also re-arms the
+ *   timer from inside the expiry interrupt (it resynchronizes reception after
+ *   an aborted transmission), so clear the pending match before arming again.
+ * - cancel(): stop the timer and clear a pending expiry.
+ */
+typedef struct {
+    void* ctx;
+    modbus_slave_status_t (*arm)(void* ctx,
+                                 uint32_t timeout_us);
+    modbus_slave_status_t (*cancel)(void* ctx);
+} modbus_slave_timer_t;
+
+/**
+ * @brief Interrupt mask that nests, the way QP's critical sections do.
+ *
+ * enter() disables interrupts and increments a per-instance nesting count;
+ * exit() decrements it and re-enables interrupts only when the count reaches
+ * zero. The count belongs to the board, and the core only guarantees balanced
+ * pairs. Implementing it as a counter (rather than saving and restoring the
+ * mask) is what lets an application hold its own critical section across a
+ * call into the core; on a QP port, wire these two functions to the same
+ * counter as QF_CRIT_ENTRY()/QF_CRIT_EXIT().
+ */
+typedef struct {
+    void* ctx;
+    void (*enter)(void* ctx);
+    void (*exit)(void* ctx);
+} modbus_slave_critical_t;
 
 /* Event interface (application-provided) -------------------------- */
 
@@ -220,8 +237,10 @@ typedef struct {
     uint8_t* rx_buffer;
     uint16_t rx_capacity; /**< >= 256. */
     uint8_t* tx_buffer;
-    uint16_t tx_capacity;     /**< >= 256. */
-    modbus_slave_port_t port; /**< Board-provided hardware capabilities. */
+    uint16_t tx_capacity;                /**< >= 256. */
+    modbus_slave_line_t line;            /**< Board-provided RS485 line. */
+    modbus_slave_timer_t timer;          /**< Board-provided one-shot timer. */
+    modbus_slave_critical_t critical;    /**< Board-provided nested IRQ mask. */
     modbus_slave_callbacks_t callbacks;
     modbus_slave_identity_t identity;
 } modbus_slave_config_t;
@@ -235,8 +254,10 @@ typedef struct {
  */
 typedef struct modbus_slave {
     /* ---- copied at construction ---- */
-    modbus_slave_port_t port;           /**< Board-provided hardware capabilities. */
-    modbus_slave_callbacks_t callbacks; /**< Four data-space callbacks + ctx. */
+    modbus_slave_line_t line;           /**< Board-provided RS485 line. */
+    modbus_slave_timer_t timer;         /**< Board-provided one-shot timer. */
+    modbus_slave_critical_t critical;   /**< Board-provided nested IRQ mask. */
+    modbus_slave_callbacks_t callbacks; /**< Data space, address, ctx. */
     modbus_slave_identity_t identity;   /**< 0x11 report data. */
 
     uint8_t* rx_buffer; /**< Caller-owned, >= 256 bytes. */
@@ -270,7 +291,7 @@ typedef struct modbus_slave {
  * Returns MODBUS_SLAVE_ERR_ARG when @p me or
  * @p config is NULL, the baudrate is 0, a
  * buffer is NULL or smaller than 256 bytes, the two buffers overlap, any of
- * the seven port operations is NULL, any of the five callbacks is NULL, or the
+ * the seven hardware operations is NULL, any of the five callbacks is NULL, or the
  * identity has additional_length > 249 (or a non-NULL length with a NULL
  * pointer).
  */

@@ -14,10 +14,10 @@ application owns the scheduling.
 - **The address is a question**: the callbacks answer the current slave
   address before every frame, so a register write or a DIP switch applies to
   the next one, with no reconfiguration step.
-- **Board-owned hardware**: the board module implements the hardware port
-  (UART direction control, byte output, one-shot timer, critical sections)
-  and owns the core instances, typically as a static array — the same
-  pattern as `sig24131_board.c`.
+- **Board-owned hardware**: the board module implements three capabilities —
+  the RS485 line, the one-shot timer and a nesting interrupt mask, each with
+  its own context — and owns the core instances, typically as a static array,
+  the same pattern as `sig24131_board.c`.
 
 Supported function codes: `01`, `02`, `03`, `04`, `05`, `06`, `0F`, `10`,
 `11`. Everything else (including `08` Diagnostics, `17`, `2B/0E`) answers
@@ -57,17 +57,21 @@ further stacks can be added next to `modbus_slave/`.
 application AO (event queue, its own states)
         ▲  event port (frame received / frame sent / TX timeout)
 modbus_slave_t core                 pure C: session, RX/TX FSM, T3.5, CRC, PDU
-        ▲  hardware port (UART, DE, timer, critical section)
+        ▲  line · timer · critical (three capability structs, one ctx each)
 board binding                       pure C: USART, DE, T3.5 timer, buffers
         ▲
 hardware
 ```
 
-Three interfaces cross the boundaries:
+Five seams, each a constructor or runtime dependency:
 
-- `modbus_slave_port_t` — the **hardware port**, a constructor dependency
-  passed in `modbus_slave_config_t`. There is no setter: swapping the UART
-  or timer at runtime would corrupt the frame machines.
+- `modbus_slave_line_t` — the **RS485 line**: direction, one byte out, end of
+  the stream. A constructor dependency in `modbus_slave_config_t`.
+- `modbus_slave_timer_t` — the **one-shot timer** behind T3.5 and the TX
+  watchdog. Constructor dependency.
+- `modbus_slave_critical_t` — the **nesting interrupt mask**. Constructor
+  dependency. The three hardware structs carry their own `ctx`, so a board's
+  UART and timer stay separate objects.
 - `modbus_slave_event_port_t` — the **event port**, a runtime dependency
   attached with `modbus_slave_set_event_port()` **before**
   `modbus_slave_start()` (after start it returns `MODBUS_SLAVE_ERR_STATE`).
@@ -75,29 +79,50 @@ Three interfaces cross the boundaries:
 - `modbus_slave_callbacks_t` — the **data space and the address**: five
   callbacks asked synchronously inside `advance()`, in the caller's context.
 
-## Hardware port contract
+## Hardware capabilities
+
+All seven operations are required; the constructor rejects a NULL.
+
+### Line — the RS485 transceiver
 
 | Operation | Context | Contract |
 |---|---|---|
-| `serial_enable(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE, disable the TXE/TC interrupts and clear a pending TC. `tx=1`: assert DE, clear TC, enable TXE+TC. `(0,0)`: disable both, release DE. |
+| `direction(rx, tx)` | task / ISR | `rx=1`: enable RX, release DE, disable the TXE/TC interrupts and clear a pending TC. `tx=1`: assert DE, clear TC, enable TXE+TC. `(0,0)`: disable both, release DE. Each call must leave the direction it does not select switched off. |
 | `put_byte(byte)` | TXE ISR | Write the UART data register, non-blocking. |
 | `tx_done()` | TXE ISR | The core has loaded the last byte (or has nothing left to send). Stop requesting TXE; keep TCIE enabled so the TC path closes the frame and releases DE. |
-| `timer_enable(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). Must also be callable from the timer's own expiry ISR — the core re-arms it there to resynchronize reception after an aborted transmission — so clear the pending match before enabling. |
-| `timer_disable()` | task / ISR | Stop and clear. |
-| `critical_enter()` / `critical_exit(state)` | ISR / task | Save+disable interrupts / restore. PRIMASK or BASEPRI on QV/QK; `portSET/CLEAR_INTERRUPT_MASK_FROM_ISR` under FreeRTOS. Not `QF_CRIT_ENTRY/EXIT` (default non-saving, non-nesting). |
+
+### Timer — one-shot
+
+| Operation | Context | Contract |
+|---|---|---|
+| `arm(us)` | task / ISR | One-shot; on expiry call `modbus_slave_timer_expired()`. Must support long timeouts (seconds at low baud). Must also be callable from the timer's own expiry ISR — the core re-arms it there to resynchronize reception after an aborted transmission — so clear the pending match before arming again. |
+| `cancel()` | task / ISR | Stop and clear. |
+
+### Critical — a nesting interrupt mask
+
+| Operation | Context | Contract |
+|---|---|---|
+| `enter()` | task / ISR | Disable interrupts and increment the nesting count. |
+| `exit()` | task / ISR | Decrement; re-enable interrupts only when the count reaches zero. |
+
+The count belongs to the board; the core only guarantees balanced pairs.
+Implement it as a counter rather than a save/restore token — the QP
+`QF_CRIT_ENTRY()/QF_CRIT_EXIT()` pattern — so an application can hold its own
+critical section across a call into the core. On a QP port, wire these two
+functions to the same counter as the QF critical section.
 
 Notes the board implementation must respect:
 
 - **TXE vs TC**: TXE only means the data register is empty; the last byte is
   done when TC sets. Clear TC and enable the TC interrupt before starting a
   transmission. When the core has loaded the last byte it calls `tx_done()`:
-  the port disables TXEIE there and leaves TCIE enabled, so the TC path closes
+  the line disables TXEIE there and leaves TCIE enabled, so the TC path closes
   the frame. There is no trailing empty TXE any more.
-- **Mute the transmitter interrupts**: `serial_enable(1, 0)` must also
-  disable TXEIE/TCIE (end of frame). `tx_done()` is the mid-frame mute that
-  keeps TCIE on.
+- **Mute the transmitter interrupts**: `direction(1, 0)` must also disable
+  TXEIE/TCIE (end of frame). `tx_done()` is the mid-frame mute that keeps
+  TCIE on.
 - `modbus_slave_start()` and `modbus_slave_stop()` return
-  `MODBUS_SLAVE_ERR_IO` when a port operation fails; a failed first start is
+  `MODBUS_SLAVE_ERR_IO` when a capability fails; a failed first start is
   rolled back, so the caller can retry.
 - `modbus_slave_tx_complete()` (TC interrupt) closes TX, reopens RX and
   notifies `on_frame_sent`.
@@ -296,11 +321,11 @@ sources are kept format-clean.
 ## Testing
 
 `test/test_modbus_slave.c` drives the core through its public interface: a
-fake board supplies the hardware port and the events, the test feeds ADU bytes,
-and it checks the bytes that would reach the wire. A second part checks the
-frame codec's decode table directly — a request PDU in, a request view or an
-exception out, with no port and no interrupt involved. There is no framework
-and nothing is compiled into the library:
+fake board supplies the three hardware capabilities and the events, the test
+feeds ADU bytes, and it checks the bytes that would reach the wire. A second
+part checks the frame codec's decode table directly — a request PDU in, a
+request view or an exception out, with no port and no interrupt involved.
+There is no framework and nothing is compiled into the library:
 
 ```sh
 gcc -std=c99 -Wall -Wextra -Werror -pedantic -I modbus_slave/inc \

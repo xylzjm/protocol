@@ -45,13 +45,13 @@ static uint8_t config_valid(const modbus_slave_config_t* config)
         return 0U;
     }
 
-    if ( config->port.serial_enable == NULL
-         || config->port.put_byte == NULL
-         || config->port.tx_done == NULL
-         || config->port.timer_enable == NULL
-         || config->port.timer_disable == NULL
-         || config->port.critical_enter == NULL
-         || config->port.critical_exit == NULL ) {
+    if ( config->line.direction == NULL
+         || config->line.put_byte == NULL
+         || config->line.tx_done == NULL
+         || config->timer.arm == NULL
+         || config->timer.cancel == NULL
+         || config->critical.enter == NULL
+         || config->critical.exit == NULL ) {
         return 0U;
     }
 
@@ -82,7 +82,9 @@ modbus_slave_status_t modbus_slave_ctor(modbus_slave_t* me,
         return MODBUS_SLAVE_ERR_ARG;
     }
 
-    me->port            = config->port;
+    me->line            = config->line;
+    me->timer           = config->timer;
+    me->critical        = config->critical;
     me->callbacks       = config->callbacks;
     me->identity        = config->identity;
     me->rx_buffer       = config->rx_buffer;
@@ -134,7 +136,6 @@ modbus_slave_status_t modbus_slave_set_event_port(
 
 modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 {
-    uint32_t token;
     uint8_t failed = 0U;
 
     if ( me == NULL ) {
@@ -146,7 +147,7 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
         return MODBUS_SLAVE_ERR_STATE;
     }
 
-    token = me->port.critical_enter(me->port.ctx);
+    me->critical.enter(me->critical.ctx);
 
     if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_STOPPED ) {
         /* Enter DISCARDING before touching the port: the timeout may land
@@ -156,11 +157,11 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
 
         /* Open reception and wait out one T3.5 of bus idle, so a frame that
          * was already in flight cannot be mistaken for a complete one. */
-        if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
+        if ( me->line.direction(me->line.ctx, 1U, 0U)
              != MODBUS_SLAVE_OK ) {
             failed = 1U;
         }
-        if ( me->port.timer_enable(me->port.ctx, me->t35_us)
+        if ( me->timer.arm(me->timer.ctx, me->t35_us)
              != MODBUS_SLAVE_OK ) {
             failed = 1U;
         }
@@ -168,45 +169,44 @@ modbus_slave_status_t modbus_slave_start(modbus_slave_t* me)
         if ( failed != 0U ) {
             /* Roll the half-started instance back so a retry starts clean. */
             me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
-            (void)me->port.timer_disable(me->port.ctx);
-            (void)me->port.serial_enable(me->port.ctx, 0U, 0U);
+            (void)me->timer.cancel(me->timer.ctx);
+            (void)me->line.direction(me->line.ctx, 0U, 0U);
         }
     } else if ( me->session == (uint8_t)MODBUS_SLAVE_SESSION_DISCARDING
                 || me->session == (uint8_t)MODBUS_SLAVE_SESSION_IDLE ) {
         /* Idempotent re-entry (e.g. the application's serving entry): make sure
          * reception is on without disturbing a frame in collection. */
-        if ( me->port.serial_enable(me->port.ctx, 1U, 0U)
+        if ( me->line.direction(me->line.ctx, 1U, 0U)
              != MODBUS_SLAVE_OK ) {
             failed = 1U;
         }
     }
 
-    me->port.critical_exit(me->port.ctx, token);
+    me->critical.exit(me->critical.ctx);
     return (failed != 0U) ? MODBUS_SLAVE_ERR_IO : MODBUS_SLAVE_OK;
 }
 
 modbus_slave_status_t modbus_slave_stop(modbus_slave_t* me)
 {
-    uint32_t token;
     uint8_t failed = 0U;
 
     if ( me == NULL ) {
         return MODBUS_SLAVE_ERR_ARG;
     }
 
-    token = me->port.critical_enter(me->port.ctx);
+    me->critical.enter(me->critical.ctx);
 
     me->session = (uint8_t)MODBUS_SLAVE_SESSION_STOPPED;
     me->rx_pos  = 0U;
 
-    if ( me->port.timer_disable(me->port.ctx) != MODBUS_SLAVE_OK ) {
+    if ( me->timer.cancel(me->timer.ctx) != MODBUS_SLAVE_OK ) {
         failed = 1U;
     }
-    if ( me->port.serial_enable(me->port.ctx, 0U, 0U) != MODBUS_SLAVE_OK ) {
+    if ( me->line.direction(me->line.ctx, 0U, 0U) != MODBUS_SLAVE_OK ) {
         failed = 1U;
     }
 
-    me->port.critical_exit(me->port.ctx, token);
+    me->critical.exit(me->critical.ctx);
     return (failed != 0U) ? MODBUS_SLAVE_ERR_IO : MODBUS_SLAVE_OK;
 }
 
@@ -270,7 +270,7 @@ modbus_slave_status_t modbus_slave_tx_complete(modbus_slave_t* me)
 static void reopen_rx(modbus_slave_t* me)
 {
     me->session = (uint8_t)MODBUS_SLAVE_SESSION_IDLE;
-    (void)me->port.serial_enable(me->port.ctx, 1U, 0U);
+    (void)me->line.direction(me->line.ctx, 1U, 0U);
 }
 
 modbus_slave_step_t modbus_slave_advance(modbus_slave_t* me)

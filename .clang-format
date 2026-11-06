@@ -1,46 +1,102 @@
-# For more options, open this url: https://clang.llvm.net.cn/docs/ClangFormatStyleOptions.html
+# ============================================================================
+# clang-format 模板
+#
+# 基于 Microsoft 样式，面向嵌入式 C（C++ 亦可使用）。
+# 需要 clang-format 17 及以上，实测版本 23.1.1。
+#
+# 用法：复制到项目根目录并重命名为 .clang-format。
+#
+# 本文件只保留必要的设置：与 Microsoft 默认不同的项，以及少数需要保留
+# 意图的项（各自注释已说明）。未出现的选项沿用默认。
+# ============================================================================
 ---
 BasedOnStyle: Microsoft
-IndentWidth: 4
-UseTab: Never
-TabWidth: 4
+
+# -------------------------------- 行宽 ------------------------------------
+# 0 表示不按列宽折行：代码和注释都不会因为太长被拆开。
+# 手工换行的表达式会保留换行，运算符放到续行行首（见 BreakBeforeBinaryOperators）。
 ColumnLimit: 0
-AccessModifierOffset: -4
-NamespaceIndentation: All
-FixNamespaceComments: false
-# BreakBeforeBraces: Linux
+
+# -------------------------------- 大括号 ----------------------------------
+# 必须为 Custom，下面的 BraceWrapping 才会生效（Microsoft 默认也是 Custom）。
 BreakBeforeBraces: Custom
+
+# 只列出与 Microsoft 默认不同的项，其余沿用默认：
+#   AfterFunction: true（函数定义的 { 换行）
+#   AfterUnion: false
+#   BeforeCatch: true
+#   BeforeLambdaBody: false
+#   IndentBraces: false
 BraceWrapping:
+    # class / struct / enum / namespace / extern 块：{ 与声明同行。
     AfterClass: false
-    AfterControlStatement: MultiLine
     AfterEnum: false
-    AfterFunction: true
+    AfterExternBlock: false
     AfterNamespace: false
     AfterStruct: false
-    AfterUnion: false
-    AfterExternBlock: false
-    BeforeCatch: true
+    # 控制语句的 { 一律同行。
+    # MultiLine 在 ColumnLimit: 0 下永远不会触发（clang-format 不主动断行），
+    # 所以这里用 Never 准确表达“永不换行”。若以后设置了列宽，并希望
+    # 多行条件的 { 换行，可改为 MultiLine。
+    AfterControlStatement: Never
+    # else 与上一行的 } 同行。
     BeforeElse: false
-    BeforeLambdaBody: false
-    IndentBraces: false
+
+# --------------------------------- 指针 -----------------------------------
+# int* p 风格：* 贴近类型。
 PointerAlignment: Left
+# 关闭“从文件内容反推指针对齐”，否则 PointerAlignment: Left 可能被覆盖。
+# Microsoft 默认即为 false，保留在此是为了说明意图。
 DerivePointerAlignment: false
-BinPackParameters: AlwaysOnePerLine
-AllowAllParametersOfDeclarationOnNextLine: false
+
+# ------------------------------ 短语句合并 --------------------------------
+# 不带 else 的短 if 保持一行：if ( x ) return y;
 AllowShortIfStatementsOnASingleLine: WithoutElse
+# 短循环保持一行：while ( i < 4 ) i++;
 AllowShortLoopsOnASingleLine: true
+# 只合并空块：while ( busy ) {}
 AllowShortBlocksOnASingleLine: Empty
-IndentCaseLabels: true
-# SortIncludes: false
-AlignConsecutiveMacros: AcrossEmptyLines
-AlignConsecutiveAssignments: Consecutive
-BreakBeforeBinaryOperators: NonAssignment
+# case 后的单条语句与 case 同行：case A: return 1;
 AllowShortCaseLabelsOnASingleLine: true
+# case 标签相对 switch 缩进一级。
+IndentCaseLabels: true
+
+# --------------------------------- 对齐 -----------------------------------
+# 宏定义的值跨空行对齐。
+AlignConsecutiveMacros: AcrossEmptyLines
+# 连续赋值的 = 对齐；遇到空行即分组。
+AlignConsecutiveAssignments: Consecutive
+# 连续短 case 的语句列对齐；空行、注释处断开（其余子项默认即 false）。
 AlignConsecutiveShortCaseStatements:
     Enabled: true
-    AcrossEmptyLines: false    # 空行是否仍参与对齐
-    AcrossComments: false      # 注释行是否仍参与对齐
-    AlignCaseColons: false     # 关键：对齐冒号后面的语句，而不是对齐冒号本身
+
+# ------------------------------- 续行位置 ---------------------------------
+# 被手工换行的二元表达式，运算符放在续行行首：
+#   if ( a > 0
+#        && b > 0 ) {
+BreakBeforeBinaryOperators: NonAssignment
+
+# --------------------------------- 空格 -----------------------------------
+# 自定义括号内空格。
 SpacesInParens: Custom
 SpacesInParensOptions:
+    # 条件语句括号内加空格：if ( x )、while ( x )、switch ( x )。
+    # 注意 do-while 的 while ( 0 ) 同样生效。
+    # 函数调用、类型转换、表达式分组括号保持不加空格。
     InConditionalStatements: true
+
+# ------------------------------- C++ 专用 ---------------------------------
+# 以下三项只影响 C++ 文件，纯 C 项目可以整段删除。
+# public: / private: 相对类体再缩进 4 格，即顶格书写。
+AccessModifierOffset: -4
+# namespace 的内容整体缩进。
+NamespaceIndentation: All
+# 不自动在 namespace 结束处生成注释。
+FixNamespaceComments: false
+
+# ------------------------------ 默认即如此 ---------------------------------
+# 以下行为是 Microsoft 样式的默认值，无需显式配置：
+#   短参数列表保持一行    PackParameters.BinPack（旧写法 BinPackParameters: BinPack）
+#   行尾注释按列对齐      AlignTrailingComments: Always
+#   续行反斜杠右对齐      AlignEscapedNewlines: Right
+#   缩进 4 空格、不使用 Tab

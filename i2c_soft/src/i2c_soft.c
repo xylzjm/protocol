@@ -35,12 +35,7 @@ static uint8_t addr_valid(uint8_t addr7)
 /* Waveform                                                                   */
 /*----------------------------------------------------------------------------*/
 
-/*
- * Every group below runs as one critical section: the edges and the delays of
- * one bit must not be torn apart by an interrupt that touches the same pins.
- * delay_us() therefore runs with interrupts masked and must not depend on a
- * tick interrupt to come back.
- */
+/* Each bit is one critical section; delay_us() must work with IRQs masked. */
 
 /** @brief One half SCL period, spent inside the caller's critical section. */
 static void half_period(i2c_soft_t* me)
@@ -82,9 +77,8 @@ static void restart_cond(i2c_soft_t* me)
 /**
  * @brief STOP: SDA rises while SCL is high.
  *
- * SCL is pulled low first, so the sequence is a STOP whatever state the bus
- * is in: bus recovery ends with both lines released, and an SDA fall with
- * SCL high would be read as a START instead.
+ * SCL is pulled low first, so this is a STOP whatever the bus state; an SDA
+ * fall with SCL high would be read as a START instead.
  */
 static void stop_cond(i2c_soft_t* me)
 {
@@ -157,6 +151,20 @@ static uint8_t read_byte(i2c_soft_t* me)
 /* Bus recovery                                                               */
 /*----------------------------------------------------------------------------*/
 
+/** @brief Both lines read high: the bus is idle. */
+static uint8_t bus_idle(i2c_soft_t* me)
+{
+    uint8_t scl_high;
+    uint8_t sda_high;
+
+    me->critical.enter(me->critical.ctx);
+    scl_high = (uint8_t)(me->port.scl_read(me->port.ctx) != 0U);
+    sda_high = (uint8_t)(me->port.sda_read(me->port.ctx) != 0U);
+    me->critical.exit(me->critical.ctx);
+
+    return (uint8_t)((scl_high != 0U) && (sda_high != 0U));
+}
+
 i2c_soft_status_t i2c_soft_bus_recover(i2c_soft_t* me)
 {
     uint8_t index;
@@ -181,7 +189,7 @@ i2c_soft_status_t i2c_soft_bus_recover(i2c_soft_t* me)
     }
     if ( sda_high != 0U ) {
         stop_cond(me);
-        return I2C_SOFT_OK;
+        return (bus_idle(me) != 0U) ? I2C_SOFT_OK : I2C_SOFT_ERR_BUS;
     }
 
     /* Nine clocks at most: a slave that let go mid-way stops the count. */
@@ -199,11 +207,7 @@ i2c_soft_status_t i2c_soft_bus_recover(i2c_soft_t* me)
     }
 
     stop_cond(me);
-
-    me->critical.enter(me->critical.ctx);
-    sda_high = (uint8_t)(me->port.sda_read(me->port.ctx) != 0U);
-    me->critical.exit(me->critical.ctx);
-    return (sda_high != 0U) ? I2C_SOFT_OK : I2C_SOFT_ERR_BUS;
+    return (bus_idle(me) != 0U) ? I2C_SOFT_OK : I2C_SOFT_ERR_BUS;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -251,12 +255,7 @@ i2c_soft_status_t i2c_soft_init(i2c_soft_t* me)
         }
     }
 
-    me->critical.enter(me->critical.ctx);
-    scl_low = (uint8_t)(me->port.scl_read(me->port.ctx) == 0U);
-    sda_low = (uint8_t)(me->port.sda_read(me->port.ctx) == 0U);
-    me->critical.exit(me->critical.ctx);
-
-    if ( scl_low != 0U || sda_low != 0U ) {
+    if ( bus_idle(me) == 0U ) {
         return I2C_SOFT_ERR_BUS;
     }
     return I2C_SOFT_OK;

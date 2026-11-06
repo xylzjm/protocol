@@ -5,12 +5,15 @@
 
 #include "i2c_soft.h"
 
+/** @brief Address the fake slave answers to. */
 #define SLAVE_ADDR 0x50U
+/** @brief One library half period, as the fake port sees it. */
 #define HALF_US    I2C_SOFT_HALF_PERIOD_US
 
 static int checks;
 static int failures;
 
+/** @brief Count one check and print a failure at its source line. */
 #define CHECK(cond)                                                          \
     do {                                                                     \
         checks++;                                                            \
@@ -24,6 +27,7 @@ static int failures;
 /* Event log                                                                  */
 /*----------------------------------------------------------------------------*/
 
+/** @brief Event kinds recorded in ev_log. */
 enum {
     EV_SDA_W = 0,
     EV_SCL_W,
@@ -32,11 +36,13 @@ enum {
     EV_DELAY
 };
 
+/** @brief Capacity of the event log. */
 #define EV_MAX 4096U
 
+/** @brief One recorded port operation. */
 typedef struct {
-    uint8_t  kind;
-    uint32_t value;
+    uint8_t  kind;  /**< EV_* kind. */
+    uint32_t value; /**< Written level, sampled level or delay. */
 } ev_t;
 
 static ev_t   ev_log[EV_MAX];
@@ -68,6 +74,7 @@ typedef enum {
     SL_DONE      /**< Address NACKed: ignore the bus until STOP or START. */
 } slave_phase_t;
 
+/** @brief Fake bus, slave model and critical-section accounting. */
 typedef struct {
     /* host-driven and resolved line levels */
     uint8_t host_sda;
@@ -76,12 +83,14 @@ typedef struct {
     uint8_t scl_line;
 
     /* fault injection */
-    uint8_t  sda_stuck;     /**< Slave holds SDA low whatever the host does. */
-    uint8_t  scl_stuck;     /**< SCL never rises. */
-    uint32_t release_after; /**< SCL edges until sda_stuck clears; 0 = never. */
-    uint8_t  nack_addr;     /**< Refuse to acknowledge the address. */
-    int      nack_wr;       /**< 0-based write byte to NACK; -1 = none. */
-    uint8_t  slave_addr;    /**< Address the fake answers to. */
+    uint8_t  sda_stuck;       /**< Slave holds SDA low regardless of host. */
+    uint8_t  scl_stuck;       /**< SCL never rises. */
+    uint32_t release_after;   /**< SCL edges until SDA releases; 0 = never. */
+    uint32_t scl_stuck_after; /**< SCL rises before it sticks low; 0 = never. */
+    uint8_t  nack_addr;       /**< Refuse to acknowledge the address. */
+    uint8_t  nack_read_addr;  /**< Refuse an address with R/W = 1. */
+    int      nack_wr;         /**< 0-based write byte to NACK; -1 = none. */
+    uint8_t  slave_addr;      /**< Address the fake answers to. */
     uint8_t  rd_data[16];
     uint8_t  rd_len;
     uint8_t  rd_pos;
@@ -251,7 +260,9 @@ static void slave_fall(fake_t* f)
                 f->addr_count++;
                 f->rw        = (uint8_t)(f->shift & 1U);
                 if ( (f->shift >> 1) == f->slave_addr
-                     && f->nack_addr == 0U ) {
+                     && f->nack_addr == 0U
+                     && (f->nack_read_addr == 0U
+                         || (f->shift & 1U) == 0U) ) {
                     f->in_ack  = 1U;
                     f->sda_low = 1U; /* acknowledge while SCL is low */
                 } else {
@@ -357,6 +368,11 @@ static void fake_scl_write(void* ctx, uint8_t level)
                 resolve_levels(f);
             }
             slave_rise(f);
+            if ( f->scl_stuck_after != 0U
+                 && f->scl_rises >= f->scl_stuck_after ) {
+                f->scl_stuck = 1U;
+                resolve_levels(f);
+            }
         } else {
             slave_fall(f);
         }
@@ -525,6 +541,7 @@ static void expect_ev_at(int line, uint8_t kind, uint32_t value)
     ev_pos++;
 }
 
+/** @brief Expect an event at the current source line. */
 #define EXPECT(kind, value) expect_ev_at(__LINE__, (kind), (value))
 
 static void expect_end(void)
@@ -710,8 +727,8 @@ static void test_init_recovers_sda(void)
     expect_pulse(0U);
     expect_pulse(1U);       /* third clock: the slave lets go */
     expect_stop();
-    EXPECT(EV_SDA_R, 1U);   /* recovery confirms SDA is high */
-    expect_recheck(1U, 1U); /* init confirms both lines */
+    expect_recheck(1U, 1U); /* recovery confirms both lines */
+    expect_recheck(1U, 1U); /* init confirms them once more */
     expect_end();
 
     CHECK(bus.sda_line == 1U);
@@ -744,7 +761,7 @@ static void test_init_sda_never_releases(void)
         expect_pulse(0U);
     }
     expect_stop();
-    EXPECT(EV_SDA_R, 0U); /* still held: recovery gives up */
+    expect_recheck(1U, 0U); /* still held: recovery gives up */
     expect_end();
 
     CHECK(bus.sda_line == 0U);
@@ -903,6 +920,35 @@ static void test_write_read(void)
     CHECK(bus.crit_depth == 0U);
 }
 
+/* A NACK of the read address ends the transfer after the repeated START. */
+static void test_write_read_read_addr_nack(void)
+{
+    static const uint8_t wr[1] = { 0x04U };
+    uint8_t             rd[2] = { 0xAAU, 0xBBU };
+
+    setup();
+    bus.nack_read_addr = 1U;
+
+    CHECK(i2c_soft_write_read(&dev, SLAVE_ADDR, wr, sizeof wr, rd, sizeof rd)
+          == I2C_SOFT_ERR_NACK);
+
+    expect_start();
+    expect_write_byte((uint8_t)(SLAVE_ADDR << 1), 0U);
+    expect_write_byte(0x04U, 0U);
+    expect_restart();
+    expect_write_byte((uint8_t)((SLAVE_ADDR << 1) | 1U), 1U);
+    expect_stop();
+    expect_end();
+
+    CHECK(rd[0] == 0xAAU); /* the read phase never ran */
+    CHECK(rd[1] == 0xBBU);
+    CHECK(bus.restarts == 1);
+    CHECK(bus.rd_pos == 0U);
+    CHECK(bus.mack_count == 0U);
+    CHECK(bus.crit_depth == 0U);
+    CHECK(bus.irq_enabled == 1U);
+}
+
 /*----------------------------------------------------------------------------*/
 /* 9. zero lengths never touch the bus                                        */
 /*----------------------------------------------------------------------------*/
@@ -965,7 +1011,7 @@ static void test_probe(void)
 static void test_address_nack(void)
 {
     static const uint8_t wr[2] = { 0x11U, 0x22U };
-    uint8_t             rd[2];
+    uint8_t             rd[2] = { 0xAAU, 0xBBU };
 
     setup();
     bus.nack_addr = 1U;
@@ -998,6 +1044,8 @@ static void test_address_nack(void)
     CHECK(bus.mack_count == 0);
     CHECK(bus.stops == 1);
     CHECK(bus.crit_depth == 0U);
+    CHECK(rd[0] == 0xAAU); /* a NACKed read leaves the buffer alone */
+    CHECK(rd[1] == 0xBBU);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1007,7 +1055,7 @@ static void test_address_nack(void)
 static void test_write_nack(void)
 {
     static const uint8_t wr[3] = { 0x11U, 0x22U, 0x33U };
-    uint8_t             rd[1];
+    uint8_t             rd[1] = { 0x5AU };
 
     setup();
     bus.nack_wr = 1;
@@ -1043,6 +1091,7 @@ static void test_write_nack(void)
     CHECK(bus.stops == 1);
     CHECK(bus.rd_pos == 0);
     CHECK(bus.mack_count == 0);
+    CHECK(rd[0] == 0x5AU); /* the read phase never touched the buffer */
     CHECK(bus.crit_depth == 0U);
 }
 
@@ -1063,19 +1112,44 @@ static void test_reserved_addresses(void)
 
     CHECK(i2c_soft_write(&dev, 0x00U, wr, sizeof wr) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_write(&dev, 0x78U, wr, sizeof wr) == I2C_SOFT_ERR_ARG);
+    CHECK(i2c_soft_write(&dev, 0x7FU, wr, sizeof wr) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_write(&dev, 0x80U, wr, sizeof wr) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_read(&dev, 0x00U, rd, sizeof rd) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_read(&dev, 0x78U, rd, sizeof rd) == I2C_SOFT_ERR_ARG);
+    CHECK(i2c_soft_read(&dev, 0x7FU, rd, sizeof rd) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_read(&dev, 0x80U, rd, sizeof rd) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_probe(&dev, 0x00U) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_probe(&dev, 0x78U) == I2C_SOFT_ERR_ARG);
+    CHECK(i2c_soft_probe(&dev, 0x7FU) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_probe(&dev, 0x80U) == I2C_SOFT_ERR_ARG);
     CHECK(i2c_soft_write_read(&dev, 0x78U, wr, sizeof wr, rd, sizeof rd)
+          == I2C_SOFT_ERR_ARG);
+    CHECK(i2c_soft_write_read(&dev, 0x7FU, wr, sizeof wr, rd, sizeof rd)
           == I2C_SOFT_ERR_ARG);
 
     CHECK(bus.op_count == op_count);
     CHECK(bus.crit_count == crit_count);
     CHECK(ev_len == 0U);
+}
+
+/* The valid ends of the range reach the bus and are acknowledged. */
+static void test_address_limits(void)
+{
+    static const uint8_t data[1] = { 0x00U };
+
+    setup();
+    bus.slave_addr = 0x01U;
+    CHECK(i2c_soft_write(&dev, 0x01U, data, sizeof data) == I2C_SOFT_OK);
+    CHECK(bus.addr_byte == 0x02U);
+    CHECK(bus.addr_count == 1);
+    CHECK(bus.stops == 1);
+
+    setup();
+    bus.slave_addr = 0x77U;
+    CHECK(i2c_soft_write(&dev, 0x77U, data, sizeof data) == I2C_SOFT_OK);
+    CHECK(bus.addr_byte == 0xEEU);
+    CHECK(bus.addr_count == 1);
+    CHECK(bus.stops == 1);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1231,6 +1305,74 @@ static void test_critical_balance(void)
     CHECK(bus.crit_depth == 0U);
     CHECK(bus.irq_enabled == 1U);
     CHECK(bus.crit_underflow == 0U);
+
+    /* ...and when the transfer NACKs. */
+    setup();
+    bus.op_min_depth = 0xFFFFFFFFU;
+    bus.op_max_depth = 0U;
+    bus.delay_d0     = 0U;
+    bus.delay_d1     = 0U;
+    bus.delay_dother = 0U;
+    bus.nack_addr    = 1U;
+
+    fake_enter(&bus);
+    CHECK(i2c_soft_write(&dev, SLAVE_ADDR, data, sizeof data)
+          == I2C_SOFT_ERR_NACK);
+    CHECK(bus.crit_depth == 1U);
+    CHECK(bus.irq_enabled == 0U);
+    CHECK(bus.op_min_depth == 2U);
+    CHECK(bus.op_max_depth == 2U);
+    CHECK(bus.delay_d1 == 0U);
+    CHECK(bus.delay_dother > 0U);
+    fake_exit(&bus);
+
+    CHECK(bus.crit_depth == 0U);
+    CHECK(bus.irq_enabled == 1U);
+    CHECK(bus.crit_underflow == 0U);
+}
+
+/** @brief Every delay ran at critical depth 1 and every pair balanced. */
+static void expect_clean_critical(void)
+{
+    CHECK(bus.delay_bad == 0U);
+    CHECK(bus.delay_d0 == 0U);
+    CHECK(bus.delay_dother == 0U);
+    CHECK(bus.crit_depth == 0U);
+    CHECK(bus.irq_enabled == 1U);
+    CHECK(bus.crit_underflow == 0U);
+    CHECK(bus.op_min_depth == 1U);
+    CHECK(bus.op_max_depth == 1U);
+}
+
+/* The per-bit invariant holds on every API, not only on write. */
+static void test_all_paths_critical(void)
+{
+    static const uint8_t wr[1]   = { 0x04U };
+    static const uint8_t data[1] = { 0xA5U };
+    uint8_t             rd[2];
+
+    setup();
+    CHECK(i2c_soft_read(&dev, SLAVE_ADDR, rd, sizeof rd) == I2C_SOFT_OK);
+    expect_clean_critical();
+
+    setup();
+    CHECK(i2c_soft_write_read(&dev, SLAVE_ADDR, wr, sizeof wr, rd, sizeof rd)
+          == I2C_SOFT_OK);
+    expect_clean_critical();
+
+    setup();
+    CHECK(i2c_soft_probe(&dev, SLAVE_ADDR) == I2C_SOFT_OK);
+    expect_clean_critical();
+
+    setup();
+    CHECK(i2c_soft_bus_recover(&dev) == I2C_SOFT_OK);
+    expect_clean_critical();
+
+    setup();
+    bus.nack_addr = 1U;
+    CHECK(i2c_soft_write(&dev, SLAVE_ADDR, data, sizeof data)
+          == I2C_SOFT_ERR_NACK);
+    expect_clean_critical();
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1242,7 +1384,7 @@ static void test_bus_recover(void)
     i2c_soft_config_t cfg;
     int               i;
 
-    /* SDA already high: recovery only sends a STOP. */
+    /* SDA already high: recovery sends a STOP and rechecks both lines. */
     fake_reset();
     cfg = make_config();
     CHECK(i2c_soft_ctor(&dev, &cfg) == I2C_SOFT_OK);
@@ -1250,6 +1392,7 @@ static void test_bus_recover(void)
 
     expect_release(1U, 1U);
     expect_stop();
+    expect_recheck(1U, 1U);
     expect_end();
     CHECK(bus.sda_line == 1U);
     CHECK(bus.stops == 1);
@@ -1268,7 +1411,7 @@ static void test_bus_recover(void)
     expect_pulse(0U);
     expect_pulse(1U);
     expect_stop();
-    EXPECT(EV_SDA_R, 1U);
+    expect_recheck(1U, 1U);
     expect_end();
     CHECK(bus.sda_line == 1U);
 
@@ -1285,7 +1428,7 @@ static void test_bus_recover(void)
         expect_pulse(0U);
     }
     expect_stop();
-    EXPECT(EV_SDA_R, 0U);
+    expect_recheck(1U, 0U);
     expect_end();
     CHECK(bus.sda_line == 0U);
 
@@ -1305,6 +1448,59 @@ static void test_bus_recover(void)
     CHECK(bus.crit_underflow == 0U);
 }
 
+/* SCL falls after the entry check: the final STOP check must report BUS. */
+static void test_bus_recover_scl_falls(void)
+{
+    i2c_soft_config_t cfg;
+
+    fake_reset();
+    bus.scl_stuck_after = 1U;
+    cfg = make_config();
+
+    CHECK(i2c_soft_ctor(&dev, &cfg) == I2C_SOFT_OK);
+    CHECK(i2c_soft_bus_recover(&dev) == I2C_SOFT_ERR_BUS);
+
+    expect_release(1U, 1U);
+    expect_stop();          /* SCL rises, then the slave holds it low */
+    expect_recheck(0U, 1U);
+    expect_end();
+
+    CHECK(bus.scl_line == 0U);
+    CHECK(bus.stops == 0);  /* the STOP never completed */
+    CHECK(bus.crit_depth == 0U);
+    CHECK(bus.irq_enabled == 1U);
+}
+
+/* SCL falls during the pulse loop: the pulse path must also report BUS. */
+static void test_bus_recover_scl_falls_on_pulse(void)
+{
+    i2c_soft_config_t cfg;
+    int               i;
+
+    fake_reset();
+    bus.sda_stuck       = 1U;
+    bus.scl_stuck_after = 1U;
+    resolve_levels(&bus);
+    cfg = make_config();
+
+    CHECK(i2c_soft_ctor(&dev, &cfg) == I2C_SOFT_OK);
+    CHECK(i2c_soft_bus_recover(&dev) == I2C_SOFT_ERR_BUS);
+
+    expect_release(1U, 0U);
+    for ( i = 0; i < 9; ++i ) {
+        expect_pulse(0U);
+    }
+    expect_stop();
+    expect_recheck(0U, 0U);
+    expect_end();
+
+    CHECK(bus.scl_line == 0U);
+    CHECK(bus.sda_line == 0U);
+    CHECK(bus.stops == 0);  /* SCL was held low through the STOP */
+    CHECK(bus.crit_depth == 0U);
+    CHECK(bus.irq_enabled == 1U);
+}
+
 int main(void)
 {
     test_init_idle();
@@ -1315,16 +1511,21 @@ int main(void)
     test_write_multi();
     test_read_multi();
     test_write_read();
+    test_write_read_read_addr_nack();
     test_zero_length();
     test_probe();
     test_address_nack();
     test_write_nack();
     test_reserved_addresses();
+    test_address_limits();
     test_null_arguments();
     test_ctor_validation();
     test_delay_values();
     test_critical_balance();
+    test_all_paths_critical();
     test_bus_recover();
+    test_bus_recover_scl_falls();
+    test_bus_recover_scl_falls_on_pulse();
 
     CHECK(ev_overflow == 0);
 

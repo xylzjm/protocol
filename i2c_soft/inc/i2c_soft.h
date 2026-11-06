@@ -5,16 +5,9 @@
 
 /**
  * @file i2c_soft.h
- * @brief Bit-banged I2C master: pins, bit timing and interrupt masking are
- *        injected through ports.
+ * @brief Bit-banged I2C master with GPIO, delay and critical ports injected.
  *
- * The library owns the wire protocol only - START, repeated START, STOP,
- * byte shifting, acknowledge slots and bus recovery. The board owns the two
- * pins, the delay and the critical section and supplies them in
- * i2c_soft_config_t, so this header needs nothing but <stddef.h> and
- * <stdint.h>: no MCU, no vendor header, no RTOS. Every call blocks for the
- * whole transfer; see README.md for the port contracts, the timing and the
- * limits.
+ * See README.md for the port contracts, timing and limits.
  */
 
 #include <stddef.h>
@@ -35,18 +28,14 @@ typedef enum {
 /**
  * @brief The two pins, their readback and the bit delay.
  *
- * All five operations are required; i2c_soft_ctor() rejects a configuration
- * that leaves any of them NULL. Writing 1 releases the line and writing 0
- * pulls it low, so the board must configure both pins open-drain with a
- * pull-up: the library never drives a line high. delay_us() must delay at
- * least the requested time while interrupts are masked, because the library
- * calls it inside a critical section: a delay that waits for a tick
- * interrupt would hang there.
+ * Every operation is required. Writing 1 releases the line, so both pins must
+ * be open-drain with a pull-up: the library never drives a line high.
+ * delay_us() must work with interrupts masked; see README.md.
  */
 typedef struct {
-    void* ctx;                                   /**< Board context of every operation. */
-    void (*sda_write)(void* ctx, uint8_t level); /**< 0 pulls low, 1 releases. */
-    void (*scl_write)(void* ctx, uint8_t level); /**< 0 pulls low, 1 releases. */
+    void* ctx;                                   /**< Shared context. */
+    void (*sda_write)(void* ctx, uint8_t level); /**< 0 = low, 1 = release. */
+    void (*scl_write)(void* ctx, uint8_t level); /**< 0 = low, 1 = release. */
     uint8_t (*sda_read)(void* ctx);              /**< Line level: 1 = high. */
     uint8_t (*scl_read)(void* ctx);              /**< Line level: 1 = high. */
     void (*delay_us)(void* ctx, uint32_t us);    /**< Delay at least us. */
@@ -55,12 +44,9 @@ typedef struct {
 /**
  * @brief A nesting interrupt mask, held for one edge group at a time.
  *
- * Both operations are required. enter() masks interrupts and increments the
- * nesting count; exit() decrements and unmasks only when the count reaches
- * zero. Nesting is what lets a caller wrap its own critical section around a
- * transaction while the library's inner pairs simply balance out. Wire both
- * to the counter the rest of the firmware uses - with QP that is
- * QF_CRIT_ENTRY()/QF_CRIT_EXIT() - rather than to a save/restore token.
+ * enter() masks and increments; exit() decrements and unmasks at zero, so a
+ * caller can nest its own critical section around a transaction. Wire both
+ * to the board's shared nesting counter; see README.md.
  */
 typedef struct {
     void* ctx;
@@ -77,9 +63,8 @@ typedef struct {
 /**
  * @brief One bus instance; the storage belongs to the caller.
  *
- * Static allocation only: there is no dynamic memory and no mutable global
- * state, so any number of instances coexist. The members are private: build
- * the instance with i2c_soft_ctor() and leave them alone afterwards.
+ * Static allocation only; build it with i2c_soft_ctor() and treat the
+ * members as private.
  */
 typedef struct {
     i2c_soft_port_t port;              /**< Private; set by i2c_soft_ctor(). */
@@ -89,11 +74,10 @@ typedef struct {
 /**
  * @brief Half SCL period in microseconds (5 us, nominally 100 kHz).
  *
- * Define it to another value before including this header to change the bit
- * rate; 5 us is a safe starting point for standard mode. Every half period
- * is spent in delay_us(), so the real SCL frequency also carries the port's
- * call overhead: the library does not promise an exact 100 kHz, and a value
- * far below 5 us breaks the I2C timing rules.
+ * Define it for the whole build: the value is compiled into i2c_soft.c, so
+ * defining it only in a caller translation unit does not change the timing.
+ * 5 us is a safe standard-mode starting point; port call overhead keeps the
+ * real SCL below the nominal 100 kHz. See README.md for details.
  */
 #ifndef I2C_SOFT_HALF_PERIOD_US
 #define I2C_SOFT_HALF_PERIOD_US 5U
@@ -140,7 +124,7 @@ i2c_soft_status_t i2c_soft_init(i2c_soft_t* me);
  * @param len Number of bytes; must be greater than zero.
  * @return I2C_SOFT_OK, I2C_SOFT_ERR_ARG for a bad argument, or
  *         I2C_SOFT_ERR_NACK when the address or a byte is NACKed; a STOP is
- *         sent first and the remaining bytes are not.
+ *         sent and the remaining bytes are not.
  * @note Blocking; task context only. The library is not thread-safe: the
  *       caller serializes access to an instance and to the bus.
  */
@@ -179,8 +163,11 @@ i2c_soft_status_t i2c_soft_read(i2c_soft_t* me,
  * @param rd Buffer for the read phase; must stay valid for the whole call.
  * @param rd_len Read length; must be greater than zero.
  * @return I2C_SOFT_OK, I2C_SOFT_ERR_ARG for a bad argument, or
- *         I2C_SOFT_ERR_NACK on the first NACKed address or write byte; a
- *         STOP is sent, no repeated START follows and rd is not touched.
+ *         I2C_SOFT_ERR_NACK when an address or a write byte is NACKed. A
+ *         STOP is sent and the remaining phases are skipped: a write-phase
+ *         NACK stops before the repeated START, while a NACK of the read
+ *         address after it stops before the read data and leaves rd
+ *         untouched.
  * @note Blocking; task context only.
  */
 i2c_soft_status_t i2c_soft_write_read(i2c_soft_t* me,
@@ -213,9 +200,9 @@ i2c_soft_status_t i2c_soft_probe(i2c_soft_t* me,
  * driving against it would make two outputs fight.
  *
  * @param me Initialized instance.
- * @return I2C_SOFT_OK when SDA is high afterwards, I2C_SOFT_ERR_ARG for a
- *         NULL instance, or I2C_SOFT_ERR_BUS when SCL is low or SDA is still
- *         low after the pulses.
+ * @return I2C_SOFT_OK when both lines read high after the final STOP,
+ *         I2C_SOFT_ERR_ARG for a NULL instance, or I2C_SOFT_ERR_BUS when SCL
+ *         is low or SDA is still low.
  * @note Blocking; task context only. Transactions never recover on their
  *       own: after I2C_SOFT_ERR_NACK the caller decides whether to call
  *       this.

@@ -12,6 +12,7 @@
 
 static int checks;
 static int failures;
+static uint32_t expected_half_us;
 
 /** @brief Count one check and print a failure at its source line. */
 #define CHECK(cond)                                                          \
@@ -406,7 +407,7 @@ static void fake_delay(void* ctx, uint32_t us)
     fake_t* f = (fake_t*)ctx;
 
     note_op(f);
-    if ( us != HALF_US ) {
+    if ( us != expected_half_us ) {
         f->delay_bad++;
     }
     if ( f->crit_depth == 0U ) {
@@ -459,6 +460,7 @@ static void fake_reset(void)
     bus.irq_enabled   = 1U;
     bus.op_min_depth  = 0xFFFFFFFFU;
 
+    expected_half_us = HALF_US;
     resolve_levels(&bus);
 
     ev_len = 0U;
@@ -482,6 +484,7 @@ static i2c_soft_config_t make_config(void)
     cfg.critical.enter = fake_enter;
     cfg.critical.exit  = fake_exit;
 
+    cfg.half_period_us = 0U; /* default */
     return cfg;
 }
 
@@ -569,7 +572,7 @@ static void expect_release(uint8_t scl, uint8_t sda)
 {
     EXPECT(EV_SDA_W, 1U);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_R, scl);
     EXPECT(EV_SDA_R, sda);
 }
@@ -584,40 +587,40 @@ static void expect_recheck(uint8_t scl, uint8_t sda)
 static void expect_start(void)
 {
     EXPECT(EV_SDA_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
 }
 
 static void expect_restart(void)
 {
     EXPECT(EV_SDA_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SDA_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
 }
 
 static void expect_stop(void)
 {
     EXPECT(EV_SCL_W, 0U);
     EXPECT(EV_SDA_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SDA_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
 }
 
 static void expect_write_bit(uint8_t bit)
 {
     EXPECT(EV_SDA_W, bit);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 0U);
 }
 
@@ -625,9 +628,9 @@ static void expect_write_bit(uint8_t bit)
 static void expect_ack_slot(uint8_t sampled)
 {
     EXPECT(EV_SDA_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SDA_R, sampled);
     EXPECT(EV_SCL_W, 0U);
 }
@@ -646,9 +649,9 @@ static void expect_write_byte(uint8_t byte, uint8_t ack)
 static void expect_read_bit(uint8_t bit)
 {
     EXPECT(EV_SDA_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SDA_R, bit);
     EXPECT(EV_SCL_W, 0U);
 }
@@ -667,9 +670,9 @@ static void expect_read_byte(uint8_t byte, uint8_t master_ack)
 static void expect_pulse(uint8_t sda)
 {
     EXPECT(EV_SCL_W, 0U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SCL_W, 1U);
-    EXPECT(EV_DELAY, HALF_US);
+    EXPECT(EV_DELAY, expected_half_us);
     EXPECT(EV_SDA_R, sda);
 }
 
@@ -1248,6 +1251,7 @@ static void test_delay_values(void)
     static const uint8_t data[1] = { 0xA5U };
 
     setup();
+    CHECK(dev.half_period_us == HALF_US); /* zero config selects the default */
     CHECK(i2c_soft_write(&dev, SLAVE_ADDR, data, sizeof data)
           == I2C_SOFT_OK);
 
@@ -1257,6 +1261,37 @@ static void test_delay_values(void)
     CHECK(bus.delay_d1 > 0U);
     CHECK(bus.op_min_depth == 1U);
     CHECK(bus.op_max_depth == 1U);
+    CHECK(bus.crit_depth == 0U);
+}
+
+/* A non-zero configuration value overrides the compile-time default. */
+static void test_half_period_override(void)
+{
+    static const uint8_t data[1] = { 0xA5U };
+    i2c_soft_config_t     cfg;
+
+    fake_reset();
+    expected_half_us = 6U;
+    cfg = make_config();
+    cfg.half_period_us = 6U;
+
+    CHECK(i2c_soft_ctor(&dev, &cfg) == I2C_SOFT_OK);
+    CHECK(dev.half_period_us == 6U);
+    CHECK(i2c_soft_init(&dev) == I2C_SOFT_OK);
+    ev_len = 0U;
+    ev_pos = 0U;
+
+    CHECK(i2c_soft_write(&dev, SLAVE_ADDR, data, sizeof data)
+          == I2C_SOFT_OK);
+
+    expect_start();
+    expect_write_byte((uint8_t)(SLAVE_ADDR << 1), 0U);
+    expect_write_byte(0xA5U, 0U);
+    expect_stop();
+    expect_end();
+
+    CHECK(bus.delay_bad == 0U);
+    CHECK(dev.half_period_us == 6U);
     CHECK(bus.crit_depth == 0U);
 }
 
@@ -1521,6 +1556,7 @@ int main(void)
     test_null_arguments();
     test_ctor_validation();
     test_delay_values();
+    test_half_period_override();
     test_critical_balance();
     test_all_paths_critical();
     test_bus_recover();

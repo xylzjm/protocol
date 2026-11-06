@@ -40,7 +40,7 @@ static uint8_t addr_valid(uint8_t addr7)
 /** @brief One half SCL period, spent inside the caller's critical section. */
 static void half_period(i2c_soft_t* me)
 {
-    me->port.delay_us(me->port.ctx, I2C_SOFT_HALF_PERIOD_US);
+    me->port.delay_us(me->port.ctx, me->half_period_us);
 }
 
 /**
@@ -221,8 +221,12 @@ i2c_soft_status_t i2c_soft_ctor(i2c_soft_t* me,
         return I2C_SOFT_ERR_ARG;
     }
 
-    me->port     = config->port;
-    me->critical = config->critical;
+    me->port           = config->port;
+    me->critical       = config->critical;
+    me->half_period_us = config->half_period_us;
+    if ( me->half_period_us == 0U ) {
+        me->half_period_us = I2C_SOFT_HALF_PERIOD_US;
+    }
     return I2C_SOFT_OK;
 }
 

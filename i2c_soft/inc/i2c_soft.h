@@ -54,10 +54,16 @@ typedef struct {
     void (*exit)(void* ctx);
 } i2c_soft_port_critical_t;
 
-/** @brief Construction input: the GPIO port and the critical port. */
+/**
+ * @brief Construction input: the ports and the bit timing.
+ *
+ * half_period_us selects the half SCL period for this instance; zero uses
+ * I2C_SOFT_HALF_PERIOD_US. See README.md for the timing rules.
+ */
 typedef struct {
     i2c_soft_port_t port;              /**< Pins, readback and bit delay. */
     i2c_soft_port_critical_t critical; /**< Nesting interrupt mask. */
+    uint32_t half_period_us;           /**< Half period; 0 = default. */
 } i2c_soft_config_t;
 
 /**
@@ -69,15 +75,17 @@ typedef struct {
 typedef struct {
     i2c_soft_port_t port;              /**< Private; set by i2c_soft_ctor(). */
     i2c_soft_port_critical_t critical; /**< Private; set by i2c_soft_ctor(). */
+    uint32_t half_period_us;           /**< Private; from the configuration. */
 } i2c_soft_t;
 
 /**
- * @brief Half SCL period in microseconds (5 us, nominally 100 kHz).
+ * @brief Default half SCL period in microseconds (5 us, nominally 100 kHz).
  *
- * Define it for the whole build: the value is compiled into i2c_soft.c, so
- * defining it only in a caller translation unit does not change the timing.
- * 5 us is a safe standard-mode starting point; port call overhead keeps the
- * real SCL below the nominal 100 kHz. See README.md for details.
+ * i2c_soft_config_t.half_period_us overrides it per instance at construction,
+ * so an application can choose the timing at runtime without recompiling the
+ * library. This macro only supplies the default for a zero field and for code
+ * that wants the same value. 5 us is a safe standard-mode starting point; port
+ * call overhead keeps the real SCL below the nominal 100 kHz. See README.md.
  */
 #ifndef I2C_SOFT_HALF_PERIOD_US
 #define I2C_SOFT_HALF_PERIOD_US 5U
@@ -86,11 +94,13 @@ typedef struct {
 /**
  * @brief Build an instance in RAM from a configuration.
  *
- * Copies the two ports and returns: no port operation runs and no GPIO is
- * touched, so construction cannot disturb a bus that is already running.
+ * Copies the two ports and the half period, then returns: no port operation
+ * runs and no GPIO is touched, so construction cannot disturb a bus that is
+ * already running.
  *
  * @param me Instance to build; must not be NULL.
- * @param config Ports to copy; every operation must be non-NULL.
+ * @param config Ports and timing to copy; every operation must be non-NULL,
+ *        and half_period_us may be zero for I2C_SOFT_HALF_PERIOD_US.
  * @return I2C_SOFT_OK, or I2C_SOFT_ERR_ARG for a NULL argument or a missing
  *         operation.
  * @note Construction only: i2c_soft_init() must still run before the first

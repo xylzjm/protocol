@@ -14,9 +14,9 @@ the interrupt mask, and injects them through ports.
   busy loops live in this library.
 - **Static and multi-instance**: no dynamic memory, no mutable global state.
   The caller owns each `i2c_soft_t`, so any number of buses coexist.
-- **Standard mode only**: a half period of `I2C_SOFT_HALF_PERIOD_US` (5 µs,
-  nominally 100 kHz). Fast-mode 400 kHz, 10-bit addressing and multi-master
-  arbitration are out of scope.
+- **Standard mode only**: a default half period of 5 µs (nominally 100 kHz),
+  set per instance through `i2c_soft_config_t.half_period_us`. Fast-mode
+  400 kHz, 10-bit addressing and multi-master arbitration are out of scope.
 
 ## Layout
 
@@ -24,15 +24,17 @@ the interrupt mask, and injects them through ports.
 i2c_soft/                      this library's root
 ├── README.md                  this file
 ├── LICENSE-MIT                license
-├── i2c_soft.h                 public API: ports, config, instance, functions
-├── i2c_soft.c                 the protocol: waveform, recovery, transactions
+├── inc/
+│   └── i2c_soft.h             public API: ports, config, instance, functions
+├── src/
+│   └── i2c_soft.c             the protocol: waveform, recovery, transactions
 └── test/                      host test: fake port + fake slave
     └── test_i2c_soft.c
 ```
 
-The layout is flat: a build only needs this directory on the include path and
-`i2c_soft.c` in the source list. The repository root above this directory
-holds the shared `.clang-format`.
+Put `i2c_soft/inc` on the include path and `i2c_soft/src/i2c_soft.c` in the
+source list. The repository root above this directory holds the shared
+`.clang-format`.
 
 ## Layering
 
@@ -88,7 +90,7 @@ section or a mutex.
 
 | Call | What it does |
 |---|---|
-| `i2c_soft_ctor(me, config)` | Pure RAM construction: validates and copies the two ports. No port operation runs, no GPIO is touched. |
+| `i2c_soft_ctor(me, config)` | Pure RAM construction: validates and copies the two ports and the half period. No port operation runs, no GPIO is touched. |
 | `i2c_soft_init(me)` | The one bus entry point: releases SDA and SCL, waits a half period, then — SCL low ⇒ `ERR_BUS` without a single pulse; SDA low ⇒ one `i2c_soft_bus_recover()`; finally both lines must read high. Repeatable. |
 
 The four transaction APIs **never** initialize implicitly and keep no
@@ -147,15 +149,16 @@ Rules that hold for all of them:
 
 ## Bit timing
 
-Every half period is `I2C_SOFT_HALF_PERIOD_US` (default `5U`) spent in
-`delay_us()`. The macro is compiled into `i2c_soft.c`, so define it for the
-whole build — a compiler option such as
-`-DI2C_SOFT_HALF_PERIOD_US=...`, or a shared configuration header included by
-both the application and the library — not only before including
-`i2c_soft.h` in one translation unit. The port's call overhead is part of
-each half period, so the real SCL is slightly *slower* than the nominal
-figure — the library does not promise an exact 100 kHz, and standard-mode
-slaves accept slower clocks.
+Every half period is spent in `delay_us()`. Set
+`i2c_soft_config_t.half_period_us` to choose it per instance at construction;
+`0` selects the default `I2C_SOFT_HALF_PERIOD_US` (`5U`). The value is stored
+in `i2c_soft_t`, so an application can choose a different timing without
+recompiling the library. The macro is compiled into `i2c_soft.c` only as the
+default; define it for the whole build if you want to change that default.
+The port's call overhead is part of each half period, so the real SCL is
+slightly *slower* than the nominal figure — the library does not promise an
+exact 100 kHz, and standard-mode slaves accept slower clocks. A value below
+5 µs moves the bus beyond standard mode; the library does not validate it.
 
 Each waveform below is one critical section; the delay runs inside it so an
 interrupt cannot tear a bit apart. Data and addresses are MSB-first.
@@ -269,6 +272,7 @@ void app_i2c_init(void)
     cfg.critical.ctx      = NULL;
     cfg.critical.enter    = critical_enter;
     cfg.critical.exit     = critical_exit;
+    cfg.half_period_us    = 0U;  /* default; set e.g. 6U to override */
 
     (void)i2c_soft_ctor(&i2c1, &cfg);
     (void)i2c_soft_init(&i2c1);
@@ -293,8 +297,8 @@ every path, including a caller that wraps the transaction in its own critical
 section.
 
 ```sh
-gcc -std=c99 -Wall -Wextra -Werror -pedantic -I i2c_soft \
-    i2c_soft/i2c_soft.c \
+gcc -std=c99 -Wall -Wextra -Werror -pedantic -I i2c_soft/inc \
+    i2c_soft/src/i2c_soft.c \
     i2c_soft/test/test_i2c_soft.c -o test_i2c_soft
 ./test_i2c_soft
 ```
@@ -303,8 +307,8 @@ On Windows (the MinGW GCC this repository was developed with):
 
 ```powershell
 C:\Users\HP\mingw64\bin\gcc.exe -std=c99 -Wall -Wextra -Werror -pedantic `
-  -I i2c_soft `
-  i2c_soft\i2c_soft.c `
+  -I i2c_soft\inc `
+  i2c_soft\src\i2c_soft.c `
   i2c_soft\test\test_i2c_soft.c `
   -o test_i2c_soft.exe
 .\test_i2c_soft.exe

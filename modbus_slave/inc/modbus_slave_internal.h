@@ -13,9 +13,8 @@
 
 #include "modbus_slave.h"
 
+/* MODBUS_SLAVE_ADDRESS_MIN/MAX are public in modbus_slave.h. */
 #define MODBUS_SLAVE_ADDRESS_BROADCAST 0x00U
-#define MODBUS_SLAVE_ADDRESS_MIN       0x01U
-#define MODBUS_SLAVE_ADDRESS_MAX       0xF7U
 
 #define MODBUS_SLAVE_ADU_SIZE_MAX    256U
 #define MODBUS_SLAVE_ADU_PDU_OFFSET  1U

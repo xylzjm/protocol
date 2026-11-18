@@ -130,9 +130,10 @@ the slave address — plus a shared `ctx`. The limits and rules the types do not
 carry:
 
 - `address()`: a product that combines a register base with a DIP offset
-  computes it here. A value outside 1..247 makes the core ignore every frame,
-  so a miscomputed address leaves the slave silent instead of answering as if
-  it were the broadcast address.
+  computes it here. A value outside `MODBUS_SLAVE_ADDRESS_MIN` ..
+  `MODBUS_SLAVE_ADDRESS_MAX` (the public range constants, 1..247) makes the
+  core ignore every frame, so a miscomputed address leaves the slave silent
+  instead of answering as if it were the broadcast address.
 - Reads are limited to 125 registers / 2000 bits; writes to 123 registers /
   1968 bits.
 - Out-of-range addresses are the callback's job

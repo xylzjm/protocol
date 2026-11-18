@@ -138,9 +138,20 @@ typedef modbus_slave_exception_t (*modbus_slave_registers_fn)(
     modbus_slave_register_mode_t mode);
 
 /**
+ * @brief Lowest legal Modbus slave address.
+ *
+ * Slaves answer their own address 1..247 and never address 0 (broadcast).
+ */
+#define MODBUS_SLAVE_ADDRESS_MIN 0x01U
+
+/** @brief Highest legal Modbus slave address. */
+#define MODBUS_SLAVE_ADDRESS_MAX 0xF7U
+
+/**
  * @brief Current slave address, asked before every received frame.
  *
- * Return 1..247; any other value silences the slave.
+ * Return MODBUS_SLAVE_ADDRESS_MIN .. MODBUS_SLAVE_ADDRESS_MAX; any other
+ * value silences the slave.
  */
 typedef uint8_t (*modbus_slave_address_fn)(void* ctx);
 
